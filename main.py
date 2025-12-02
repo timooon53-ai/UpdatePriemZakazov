@@ -176,6 +176,15 @@ def order_type_keyboard():
         [InlineKeyboardButton("Назад ◀️", callback_data="order_back")]
     ])
 
+
+def options_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👶 Детское кресло", callback_data="child_seat")],
+        [InlineKeyboardButton("🐾 Пожелания", callback_data="preferences")],
+        [InlineKeyboardButton("💬 Комментарий", callback_data="comment")],
+        [InlineKeyboardButton("✅ Готово", callback_data="confirm_order")]
+    ])
+
 def admin_order_buttons(order_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Взял в работу ✅", callback_data=f"take_{order_id}"),
@@ -273,12 +282,6 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================
 (WAIT_SCREENSHOT, WAIT_SCREENSHOT_COMMENT, WAIT_CITY, WAIT_ADDRESS_FROM, WAIT_ADDRESS_TO, WAIT_ADD_ANOTHER_ADDRESS, WAIT_COMMENT, WAIT_TARIFF, WAIT_ADMIN_MESSAGE, WAIT_ADMIN_SUM, WAIT_OPTIONS, WAIT_CHILD_SEAT, WAIT_PREFERENCES) = range(13)
 
-
-# Новые состояния
-WAIT_OPTIONS = 9
-WAIT_CHILD_SEAT = 10
-WAIT_PREFERENCES = 11
-
 # ==========================
 # Пользовательский сценарий заказа
 # ==========================
@@ -371,8 +374,14 @@ async def text_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAIT_ADDRESS_TO
 
 async def text_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['address_to'] = geocode(update.message.text) or update.message.text
-    context.user_data['addresses'] = [context.user_data['address_from'], context.user_data['address_to']]
+    address_value = geocode(update.message.text) or update.message.text
+    context.user_data['address_to'] = address_value
+
+    # Поддерживаем список адресов, чтобы можно было добавить третий пункт
+    if 'addresses' in context.user_data:
+        context.user_data['addresses'].append(address_value)
+    else:
+        context.user_data['addresses'] = [context.user_data['address_from'], address_value]
     
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Да", callback_data="add_another_address"),
@@ -384,24 +393,15 @@ async def text_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_another_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
-    # Добавляем новый адрес к списку
-    new_address = query.message.text.replace("Хотите добавить еще один адрес?", "").strip()
-    geocoded = geocode(new_address) or new_address
-    context.user_data['addresses'].append(geocoded)
-    
+
     # Проверяем, не превысили ли лимит в 3 адреса
-    if len(context.user_data['addresses']) >= 3:
+    if len(context.user_data.get('addresses', [])) >= 3:
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("Нет", callback_data="no_additional_address")]
         ])
         await query.message.reply_text("Вы добавили максимальное количество адресов (3).", reply_markup=keyboard)
         return WAIT_ADD_ANOTHER_ADDRESS
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Да", callback_data="add_another_address"),
-         InlineKeyboardButton("Нет", callback_data="no_additional_address")]
-    ])
+
     await query.message.reply_text("Введите следующий адрес:")
     return WAIT_ADDRESS_TO
 
@@ -445,14 +445,7 @@ async def select_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'wheelchair_transport' not in context.user_data:
         context.user_data['wheelchair_transport'] = 0
     
-    # Предлагаем выбрать дополнительные опции
-    options_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👶 Детское кресло", callback_data="child_seat")],
-        [InlineKeyboardButton("🐾 Пожелания", callback_data="preferences")],
-        [InlineKeyboardButton("💬 Комментарий", callback_data="comment")],
-        [InlineKeyboardButton("✅ Готово", callback_data="confirm_order")]
-    ])
-    await query.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard)
+    await query.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard())
     return WAIT_OPTIONS
 
 
@@ -461,15 +454,39 @@ async def options_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
-    if data == "confirm_order":
+    if data == "child_seat":
+        seat_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Свое", callback_data="seat_own"), InlineKeyboardButton("9м - 4л", callback_data="seat_9m_4y")],
+            [InlineKeyboardButton("3-7л", callback_data="seat_3_7y"), InlineKeyboardButton("6-12л", callback_data="seat_6_12y")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_options")]
+        ])
+        await query.message.reply_text("Выберите детское кресло:", reply_markup=seat_keyboard)
+        return WAIT_CHILD_SEAT
+    elif data == "preferences":
+        pref_keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Перевозка животных", callback_data="pref_animal")],
+            [InlineKeyboardButton("Перевозка инвалидных кресел", callback_data="pref_wheelchair")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="back_to_options")]
+        ])
+        await query.message.reply_text("Выберите пожелание:", reply_markup=pref_keyboard)
+        return WAIT_PREFERENCES
+    elif data == "comment":
+        await query.message.reply_text("Введите комментарий или «Пропустить ➡️»", reply_markup=skip_keyboard())
+        return WAIT_COMMENT
+    elif data == "confirm_order":
         await query.message.reply_text(
             "Вы уверены, что хотите отправить заказ? Вы можете отредактировать его, если нужно.",
-            reply_markup=InlineKeyboardMarkup([  # Добавим кнопки для подтверждения
+            reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("Редактировать заказ", callback_data="edit_order")],
                 [InlineKeyboardButton("Отправить заказ", callback_data="send_order")]
             ])
         )
-        return WAIT_ADMIN_MESSAGE
+        return WAIT_OPTIONS
+    elif data == "edit_order":
+        await query.message.reply_text("Вы можете изменить детское кресло, пожелания или комментарий.", reply_markup=options_keyboard())
+        return WAIT_OPTIONS
+    elif data == "send_order":
+        return await confirm_order(update, context)
 
 async def child_seat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -478,13 +495,7 @@ async def child_seat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data == "back_to_options":
         # Возвращаемся к выбору опций
-        options_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👶 Детское кресло", callback_data="child_seat")],
-            [InlineKeyboardButton("🐾 Пожелания", callback_data="preferences")],
-            [InlineKeyboardButton("💬 Комментарий", callback_data="comment")],
-            [InlineKeyboardButton("✅ Готово", callback_data="confirm_order")]
-        ])
-        await query.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard)
+        await query.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard())
         return WAIT_OPTIONS
     else:
         # Сохраняем выбор детского кресла
@@ -498,7 +509,7 @@ async def child_seat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         # Сообщаем о сохранении и возвращаемся к опциям
         await query.message.reply_text(f"✅ Выбрано детское кресло: {context.user_data['child_seat']}")
-        await query.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard)
+        await query.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard())
         return WAIT_OPTIONS
 
 
@@ -509,13 +520,7 @@ async def preferences_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     
     if data == "back_to_options":
         # Возвращаемся к выбору опций
-        options_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👶 Детское кресло", callback_data="child_seat")],
-            [InlineKeyboardButton("🐾 Пожелания", callback_data="preferences")],
-            [InlineKeyboardButton("💬 Комментарий", callback_data="comment")],
-            [InlineKeyboardButton("✅ Готово", callback_data="confirm_order")]
-        ])
-        await query.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard)
+        await query.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard())
         return WAIT_OPTIONS
     
     else:
@@ -527,13 +532,7 @@ async def preferences_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         
         # Сообщаем о сохранении
         await query.message.reply_text("✅ Пожелание добавлено")
-        options_keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("👶 Детское кресло", callback_data="child_seat")],
-            [InlineKeyboardButton("🐾 Пожелания", callback_data="preferences")],
-            [InlineKeyboardButton("💬 Комментарий", callback_data="comment")],
-            [InlineKeyboardButton("✅ Готово", callback_data="confirm_order")]
-        ])
-        await query.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard)
+        await query.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard())
         return WAIT_OPTIONS
 
 async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -544,23 +543,8 @@ async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['comment'] = comment
     
     # После ввода комментария возвращаемся к опциям
-    options_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👶 Детское кресло", callback_data="child_seat")],
-        [InlineKeyboardButton("🐾 Пожелания", callback_data="preferences")],
-        [InlineKeyboardButton("💬 Комментарий", callback_data="comment")],
-        [InlineKeyboardButton("✅ Готово", callback_data="confirm_order")]
-    ])
-    await update.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard)
+    await update.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard())
     return WAIT_OPTIONS
-
-async def edit_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    # Перенаправляем пользователя обратно на этап выбора детского кресла
-    await query.message.reply_text("Вы можете изменить детское кресло, пожелания или комментарий.", reply_markup=options_keyboard())
-    return WAIT_OPTIONS
-
 
 # async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #     # Формируем и сохраняем заказ
@@ -758,7 +742,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_id = int(data.split("_")[1])
         order = get_order(order_id)
 
-        if order[8] != "pending":  # индекс 8 = status
+        if order[13] != "pending":  # индекс 13 = status
             await query.answer("❌ Этот заказ уже в работе или отменён", show_alert=True)
             return
 
@@ -929,7 +913,7 @@ def main():
             ],
             WAIT_TARIFF: [CallbackQueryHandler(select_tariff, pattern="^tariff_.*$")],
             WAIT_OPTIONS: [
-                CallbackQueryHandler(options_callback, pattern="^(child_seat|preferences|comment|confirm_order)$")
+                CallbackQueryHandler(options_callback, pattern="^(child_seat|preferences|comment|confirm_order|edit_order|send_order)$")
                 # Здесь confirm_order
             ],
             WAIT_CHILD_SEAT: [CallbackQueryHandler(child_seat_callback,
