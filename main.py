@@ -142,6 +142,16 @@ def update_order_amount(order_id, amount):
         c.execute("UPDATE orders SET amount=?, updated_at=? WHERE id=?", (amount, datetime.now(), order_id))
         conn.commit()
 
+
+def update_order_options(order_id, *, tariff=None, child_seat=None, animal_transport=0, wheelchair_transport=0, comment=None):
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE orders SET tariff=?, child_seat=?, animal_transport=?, wheelchair_transport=?, comment=?, updated_at=? WHERE id=?",
+            (tariff, child_seat, animal_transport, wheelchair_transport, comment, datetime.now(), order_id),
+        )
+        conn.commit()
+
 # ==========================
 # Декоратор проверки админа
 # ==========================
@@ -293,9 +303,11 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     data = query.data
     if data == "order_screenshot":
+        context.user_data['order_type'] = 'screenshot'
         await query.message.reply_text("Пришлите скриншот маршрута 📎")
         return WAIT_SCREENSHOT
     elif data == "order_text":
+        context.user_data['order_type'] = 'text'
         await query.message.reply_text("Введите город 🏙️")
         return WAIT_CITY
     elif data == "order_back":
@@ -331,6 +343,8 @@ async def screenshot_comment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     comment = update.message.text
     if comment and comment.lower() == "пропустить ➡️":
         comment = None
+
+    context.user_data['comment'] = comment
 
     order_id = context.user_data.get('order_id')
     if not order_id:
@@ -436,7 +450,18 @@ async def select_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     selected_tariff = tariff_map.get(query.data, "Не указан")
     context.user_data['tariff'] = selected_tariff
-    
+
+    # Если это скриншотный заказ, сохраняем тариф сразу
+    if context.user_data.get('order_type') == 'screenshot' and context.user_data.get('order_id'):
+        update_order_options(
+            context.user_data['order_id'],
+            tariff=selected_tariff,
+            child_seat=context.user_data.get('child_seat'),
+            animal_transport=context.user_data.get('animal_transport', 0),
+            wheelchair_transport=context.user_data.get('wheelchair_transport', 0),
+            comment=context.user_data.get('comment'),
+        )
+
     # Добавляем инициализацию данных для дополнительных опций
     if 'child_seat' not in context.user_data:
         context.user_data['child_seat'] = None
@@ -586,34 +611,53 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # Собираем все данные из context.user_data
-    city = context.user_data['city']
-    addresses = context.user_data.get('addresses', [])
-    tariff = context.user_data.get('tariff', 'Не указан')
-    child_seat = context.user_data.get('child_seat', None)
-    animal_transport = context.user_data.get('animal_transport', 0)
-    wheelchair_transport = context.user_data.get('wheelchair_transport', 0)
-    comment = context.user_data.get('comment', None)
+    order_type = context.user_data.get('order_type', 'text')
 
-    # Проверка на минимум два адреса
-    if len(addresses) < 2:
-        await query.message.reply_text("Ошибка: необходимо хотя бы два адреса.")
-        return ConversationHandler.END
+    if order_type == 'screenshot':
+        order_id = context.user_data.get('order_id')
+        if not order_id:
+            await query.message.reply_text("Ошибка: заказ не найден. Попробуйте начать сначала.")
+            return ConversationHandler.END
 
-    # Создаем заказ
-    order_id = create_order(
-        tg_id=update.effective_user.id,
-        type_="text",
-        city=city,
-        address_from=addresses[0],
-        address_to=addresses[-1],
-        address_three=addresses[1] if len(addresses) > 2 else None,
-        child_seat=child_seat,
-        animal_transport=animal_transport,
-        wheelchair_transport=wheelchair_transport,
-        comment=comment,
-        tariff=tariff
-    )
+        update_order_options(
+            order_id,
+            tariff=context.user_data.get('tariff'),
+            child_seat=context.user_data.get('child_seat'),
+            animal_transport=context.user_data.get('animal_transport', 0),
+            wheelchair_transport=context.user_data.get('wheelchair_transport', 0),
+            comment=context.user_data.get('comment'),
+        )
+    else:
+        # Собираем все данные из context.user_data
+        city = context.user_data['city']
+        addresses = context.user_data.get('addresses', [])
+        tariff = context.user_data.get('tariff', 'Не указан')
+        child_seat = context.user_data.get('child_seat', None)
+        animal_transport = context.user_data.get('animal_transport', 0)
+        wheelchair_transport = context.user_data.get('wheelchair_transport', 0)
+        comment = context.user_data.get('comment', None)
+
+        # Проверка на минимум два адреса
+        if len(addresses) < 2:
+            await query.message.reply_text("Ошибка: необходимо хотя бы два адреса.")
+            return ConversationHandler.END
+
+        # Создаем заказ
+        order_id = create_order(
+            tg_id=update.effective_user.id,
+            type_="text",
+            city=city,
+            address_from=addresses[0],
+            address_to=addresses[-1],
+            address_three=addresses[1] if len(addresses) > 2 else None,
+            child_seat=child_seat,
+            animal_transport=animal_transport,
+            wheelchair_transport=wheelchair_transport,
+            comment=comment,
+            tariff=tariff
+        )
+
+    increment_orders_count(update.effective_user.id)
 
     # Уведомление администратору
     await notify_admins(context, order_id)
