@@ -19,9 +19,9 @@ TOKEN = TOKEN
 ADMIN_IDS = ADMIN_IDS
 SCREENSHOTS_DIR = SCREENSHOTS_DIR
 DB_DIR = DB_DIR
-USERS_DB = USERS_DB
-ORDERS_DB = ORDERS_DB
-BANNED_DB = BANNED_DB
+
+DB_PATH = os.path.join(DB_DIR, "DB.db")
+USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
 
 logging.basicConfig(
     filename="bot.log",
@@ -33,21 +33,22 @@ logger = logging.getLogger(__name__)
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(DB_DIR, exist_ok=True)
 
+
+def current_timestamp():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 # ==========================
 # Инициализация БД
 # ==========================
 def init_db():
-    with sqlite3.connect(BANNED_DB) as conn:
+    with sqlite3.connect("banned.db") as conn:
         c = conn.cursor()
         c.execute("""
             CREATE TABLE IF NOT EXISTS banned (
                 tg_id INTEGER PRIMARY KEY
             )
         """)
-        conn.commit()
 
-    with sqlite3.connect(USERS_DB) as conn:
-        c = conn.cursor()
         c.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 tg_id INTEGER PRIMARY KEY,
@@ -58,15 +59,12 @@ def init_db():
                 city TEXT
             )
         """)
+        conn.commit()
 
         existing_columns = {row[1] for row in c.execute("PRAGMA table_info(users)").fetchall()}
         if "city" not in existing_columns:
             c.execute("ALTER TABLE users ADD COLUMN city TEXT")
 
-        conn.commit()
-
-    with sqlite3.connect(ORDERS_DB) as conn:
-        c = conn.cursor()
         c.execute("""
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,10 +101,6 @@ def init_db():
             if column not in existing_columns:
                 c.execute(f"ALTER TABLE orders ADD COLUMN {column} {definition}")
 
-        conn.commit()
-
-    with sqlite3.connect(ORDERS_DB) as conn:
-        c = conn.cursor()
         c.execute("""
             CREATE TABLE IF NOT EXISTS favorite_addresses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,6 +108,36 @@ def init_db():
                 address TEXT
             )
         """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+
+        c.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('ordering_enabled', '1')"
+        )
+
+        conn.commit()
+
+
+def get_setting(key, default=None):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("SELECT value FROM settings WHERE key=?", (key,))
+        row = c.fetchone()
+        return row[0] if row else default
+
+
+def set_setting(key, value):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
         conn.commit()
 
 # ==========================
@@ -143,43 +167,6 @@ def increment_orders_count(tg_id):
     with sqlite3.connect(USERS_DB) as conn:
         c = conn.cursor()
         c.execute("UPDATE users SET orders_count = orders_count + 1 WHERE tg_id=?", (tg_id,))
-        conn.commit()
-
-
-def update_user_city(tg_id, city):
-    with sqlite3.connect(USERS_DB) as conn:
-        c = conn.cursor()
-        c.execute("UPDATE users SET city=? WHERE tg_id=?", (city, tg_id))
-        conn.commit()
-
-
-def get_favorite_addresses(tg_id):
-    with sqlite3.connect(ORDERS_DB) as conn:
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute("SELECT * FROM favorite_addresses WHERE tg_id=? ORDER BY id", (tg_id,))
-        return c.fetchall()
-
-
-def add_favorite_address(tg_id, address):
-    with sqlite3.connect(ORDERS_DB) as conn:
-        c = conn.cursor()
-        c.execute("INSERT INTO favorite_addresses (tg_id, address) VALUES (?, ?)", (tg_id, address))
-        conn.commit()
-        return c.lastrowid
-
-
-def update_favorite_address(fav_id, tg_id, address):
-    with sqlite3.connect(ORDERS_DB) as conn:
-        c = conn.cursor()
-        c.execute("UPDATE favorite_addresses SET address=? WHERE id=? AND tg_id=?", (address, fav_id, tg_id))
-        conn.commit()
-
-
-def delete_favorite_address(fav_id, tg_id):
-    with sqlite3.connect(ORDERS_DB) as conn:
-        c = conn.cursor()
-        c.execute("DELETE FROM favorite_addresses WHERE id=? AND tg_id=?", (fav_id, tg_id))
         conn.commit()
 
 # ==========================
@@ -240,13 +227,19 @@ def get_order(order_id):
 def update_order_status(order_id, status):
     with sqlite3.connect(ORDERS_DB) as conn:
         c = conn.cursor()
-        c.execute("UPDATE orders SET status=?, updated_at=? WHERE id=?", (status, datetime.now(), order_id))
+        c.execute(
+            "UPDATE orders SET status=?, updated_at=? WHERE id=?",
+            (status, current_timestamp(), order_id),
+        )
         conn.commit()
 
 def update_order_amount(order_id, amount):
     with sqlite3.connect(ORDERS_DB) as conn:
         c = conn.cursor()
-        c.execute("UPDATE orders SET amount=?, updated_at=? WHERE id=?", (amount, datetime.now(), order_id))
+        c.execute(
+            "UPDATE orders SET amount=?, updated_at=? WHERE id=?",
+            (amount, current_timestamp(), order_id),
+        )
         conn.commit()
 
 
@@ -254,7 +247,7 @@ def update_order_fields(order_id, **fields):
     if not fields:
         return
     placeholders = ", ".join([f"{key}=?" for key in fields.keys()])
-    values = list(fields.values()) + [datetime.now(), order_id]
+    values = list(fields.values()) + [current_timestamp(), order_id]
     with sqlite3.connect(ORDERS_DB) as conn:
         c = conn.cursor()
         c.execute(
@@ -279,12 +272,14 @@ def admin_only(func):
 # ==========================
 # Клавиатуры
 # ==========================
-def main_menu_keyboard():
+def main_menu_keyboard(user_id=None):
     buttons = [
         [KeyboardButton("Профиль 👤")],
         [KeyboardButton("Заказать такси 🚖")],
-        [KeyboardButton("Помощь ❓")]
+        [KeyboardButton("Помощь ❓")],
     ]
+    if user_id in ADMIN_IDS:
+        buttons.append([KeyboardButton("Админка ⚙️")])
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 def back_keyboard():
@@ -397,13 +392,6 @@ def admin_search_buttons(order_id):
          InlineKeyboardButton("Отменить поиск ⏹", callback_data=f"cancelsearch_{order_id}")]
     ])
 
-
-def payment_choice_keyboard(order_id):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Карта", callback_data=f"pay_card_{order_id}")],
-        [InlineKeyboardButton("💰 Баланс", callback_data=f"pay_balance_{order_id}")],
-    ])
-
 # ==========================
 # Геокодирование
 # ==========================
@@ -444,7 +432,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_user(user.id, user.username)
     await update.message.reply_text(
         f"Привет, @{user.username or 'не указан'}! Добро пожаловать в сервис заказа такси 🚖",
-        reply_markup=main_menu_keyboard()
+        reply_markup=main_menu_keyboard(user.id)
     )
 
 async def send_profile_info(target, user_id, context):
@@ -498,52 +486,6 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=back_keyboard())
 
 
-async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    user_id = query.from_user.id
-
-    if data == "profile_city_set":
-        context.user_data["awaiting_city"] = True
-        await query.message.reply_text("🏙️ Введите ваш город:")
-    elif data == "profile_city_clear":
-        update_user_city(user_id, None)
-        await query.message.reply_text("🗑️ Город удалён")
-        await send_profile_info(query.message, user_id, context)
-    elif data == "profile_back":
-        await query.message.reply_text("Возврат в главное меню", reply_markup=main_menu_keyboard())
-    elif data == "profile_fav_manage":
-        favorites = get_favorite_addresses(user_id)
-        await query.message.reply_text(
-            "⭐ Любимые адреса",
-            reply_markup=favorites_manage_keyboard(favorites),
-        )
-    elif data == "profile_fav_add":
-        favorites = get_favorite_addresses(user_id)
-        if len(favorites) >= 3:
-            await query.answer("Можно сохранить не более 3 адресов", show_alert=True)
-            return
-        context.user_data["awaiting_fav_action"] = "add"
-        await query.message.reply_text("➕ Пришлите адрес, который хотите добавить в избранное")
-    elif data.startswith("profile_fav_edit_"):
-        fav_id = int(data.rsplit("_", 1)[1])
-        context.user_data["awaiting_fav_action"] = "edit"
-        context.user_data["fav_edit_id"] = fav_id
-        await query.message.reply_text("✏️ Пришлите новый вариант адреса")
-    elif data.startswith("profile_fav_delete_"):
-        fav_id = int(data.rsplit("_", 1)[1])
-        delete_favorite_address(fav_id, user_id)
-        await query.message.reply_text("🗑️ Адрес удалён")
-        favorites = get_favorite_addresses(user_id)
-        await query.message.reply_text(
-            "⭐ Любимые адреса",
-            reply_markup=favorites_manage_keyboard(favorites),
-        )
-    elif data == "profile_fav_back":
-        await send_profile_info(query.message, user_id, context)
-
-
 # ==========================
 # Conversation States
 # ==========================
@@ -561,17 +503,32 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WAIT_COMMENT,
     WAIT_ADMIN_MESSAGE,
     WAIT_ADMIN_SUM,
-) = range(13)
+    WAIT_ADMIN_BALANCE,
+    WAIT_ADMIN_ORDERS,
+    WAIT_ADMIN_BROADCAST,
+) = range(16)
 
 # ==========================
 # Пользовательский сценарий заказа
 # ==========================
 async def order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_ordering_enabled():
+        await update.message.reply_text(
+            "⚙️ Заказ такси временно недоступен. Бот на технических работах, попробуйте позже.",
+            reply_markup=main_menu_keyboard(update.effective_user.id),
+        )
+        return
     await update.message.reply_text("Выберите способ заказа:", reply_markup=order_type_keyboard())
 
 async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not is_ordering_enabled():
+        await query.message.reply_text(
+            "⚙️ Заказ такси временно недоступен. Бот на технических работах, попробуйте позже.",
+            reply_markup=main_menu_keyboard(query.from_user.id),
+        )
+        return ConversationHandler.END
     data = query.data
     context.user_data.clear()
     context.user_data['order_data'] = {}
@@ -588,7 +545,10 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.message.reply_text("Введите город 🏙️")
         return WAIT_CITY
     elif data == "order_back":
-        await query.message.reply_text("Возврат в главное меню", reply_markup=main_menu_keyboard())
+        await query.message.reply_text(
+            "Возврат в главное меню",
+            reply_markup=main_menu_keyboard(query.from_user.id),
+        )
         return ConversationHandler.END
 
 # ---- Клавиатура "Пропустить" ----
@@ -745,7 +705,10 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         addr_to = data.get('address_to')
 
         if not (city and addr_from and addr_to):
-            await update.message.reply_text("Ошибка: не все поля введены. Попробуйте снова.", reply_markup=main_menu_keyboard())
+            await update.message.reply_text(
+                "Ошибка: не все поля введены. Попробуйте снова.",
+                reply_markup=main_menu_keyboard(update.effective_user.id),
+            )
             context.user_data.clear()
             return ConversationHandler.END
 
@@ -779,7 +742,10 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     increment_orders_count(update.effective_user.id)
-    await update.message.reply_text(f"✅ Ваш заказ №{order_id} создан", reply_markup=main_menu_keyboard())
+    await update.message.reply_text(
+        f"✅ Ваш заказ №{order_id} создан",
+        reply_markup=main_menu_keyboard(update.effective_user.id),
+    )
     await notify_admins(context, order_id)
 
     context.user_data.clear()
@@ -905,6 +871,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("❌ Нет доступа", show_alert=True)
+        return ConversationHandler.END
     # Взял в работу
     if data.startswith("take_"):
         order_id = int(data.split("_")[1])
@@ -968,34 +937,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['order_id'] = order_id
         await query.message.reply_text("Введите сообщение пользователю:")
         return WAIT_ADMIN_MESSAGE
-    elif data.startswith("pay_card_"):
-        order_id = int(data.split("_")[2])
-        order = get_order(order_id)
-        if not order:
-            await query.answer("Заказ не найден", show_alert=True)
-            return ConversationHandler.END
-        base_amount = order.get("base_amount") or order.get("amount") or 0
-        total = order.get("amount") or 0
-        tg_id = order.get("tg_id")
-        message = (
-            "🚖 Ваше такси уже едет к вам! Ссылка на отслеживание выше!\n"
-            f"💵 Стоимость поездки: {base_amount:.2f} ₽\n"
-            f"💰 Ваша оплата нам: {total:.2f} ₽\n\n"
-            "Оплатить необходимо: ВТБ банк по номеру телефона +79088006072"
-        )
-        await context.bot.send_message(tg_id, message)
-        await query.message.reply_text("💳 Инструкция по оплате отправлена пользователю")
-    elif data.startswith("pay_balance_"):
-        order_id = int(data.split("_")[2])
-        order = get_order(order_id)
-        if not order:
-            await query.answer("Заказ не найден", show_alert=True)
-            return ConversationHandler.END
-        total = order.get("amount") or 0
-        tg_id = order.get("tg_id")
-        update_balance(tg_id, total)
-        await context.bot.send_message(tg_id, f"💰 На ваш баланс начислено {total:.2f} ₽ за заказ №{order_id}")
-        await query.message.reply_text("Баланс пользователя пополнен ✅")
 
 
 # ==========================
@@ -1009,6 +950,68 @@ async def admin_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await context.bot.send_message(tg_id, f"💬 Сообщение от администратора:\n{text}")
     await update.message.reply_text("Сообщение отправлено. Теперь введите сумму заказа (₽):")
     return WAIT_ADMIN_SUM
+
+
+async def admin_balance_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        target_id = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ Введите числовой Telegram ID")
+        return WAIT_ADMIN_BALANCE
+
+    user = get_user(target_id)
+    if not user:
+        await update.message.reply_text("Пользователь не найден", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+
+    text = (
+        f"👤 Пользователь: @{user.get('username') or 'не указан'}\n"
+        f"ID: {target_id}\n"
+        f"Баланс: {user.get('balance', 0):.2f} ₽\n"
+        f"Коэффициент: {user.get('coefficient', 1):.2f}"
+    )
+    await update.message.reply_text(text, reply_markup=admin_panel_keyboard())
+    return ConversationHandler.END
+
+
+async def admin_orders_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        target_id = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ Введите числовой Telegram ID")
+        return WAIT_ADMIN_ORDERS
+
+    orders = get_user_orders(target_id, limit=5)
+    if not orders:
+        await update.message.reply_text("Заказы не найдены", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+
+    lines = ["📦 Последние заказы:"]
+    for order in orders:
+        lines.append(
+            f"№{order['id']} — {order['status']} — {order['amount'] or 0:.2f} ₽ (база {order['base_amount'] or 0:.2f} ₽) — {order['created_at']}"
+        )
+    await update.message.reply_text("\n".join(lines), reply_markup=admin_panel_keyboard())
+    return ConversationHandler.END
+
+
+async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user_ids = get_all_user_ids()
+    sent = 0
+    failed = 0
+    for uid in user_ids:
+        try:
+            await context.bot.send_message(uid, f"📢 Рассылка:\n{text}")
+            sent += 1
+        except Exception as e:
+            logger.error(f"Не удалось отправить сообщение {uid}: {e}")
+            failed += 1
+    await update.message.reply_text(
+        f"Рассылка завершена. ✅ {sent} отправлено, ❌ {failed} не доставлено.",
+        reply_markup=admin_panel_keyboard(),
+    )
+    return ConversationHandler.END
 
 
 
@@ -1049,11 +1052,12 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from datetime import timedelta
     now = datetime.now()
     day_ago = now - timedelta(days=1)
+    day_ago_str = day_ago.strftime("%Y-%m-%d %H:%M:%S")
 
     with sqlite3.connect(ORDERS_DB) as conn:
         c = conn.cursor()
         # Заказы за сутки
-        c.execute("SELECT SUM(amount), COUNT(*) FROM orders WHERE created_at >= ?", (day_ago,))
+        c.execute("SELECT SUM(amount), COUNT(*) FROM orders WHERE created_at >= ?", (day_ago_str,))
         day_sum, day_count = c.fetchone()
         # Заказы за всё время
         c.execute("SELECT SUM(amount), COUNT(*) FROM orders")
@@ -1129,16 +1133,21 @@ def main():
         },
         fallbacks=[],
         per_user=True,
+        per_message=True,
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_balance|admin_orders|admin_broadcast|admin_toggle|admin_status)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
+            WAIT_ADMIN_BALANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_balance_lookup)],
+            WAIT_ADMIN_ORDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_orders_lookup)],
+            WAIT_ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast)],
         },
         fallbacks=[],
-        per_user=True
+        per_user=True,
+        per_message=True,
     )
 
     app.add_handler(conv_handler)
@@ -1150,38 +1159,6 @@ def main():
     # Меню пользователя
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
-        user_id = update.effective_user.id
-
-        if context.user_data.get("awaiting_city"):
-            city = text.strip()
-            update_user_city(user_id, city)
-            context.user_data.pop("awaiting_city", None)
-            await update.message.reply_text(f"🏙️ Город сохранён: {city}")
-            await send_profile_info(update.message, user_id, context)
-            return
-
-        if context.user_data.get("awaiting_fav_action"):
-            action = context.user_data.get("awaiting_fav_action")
-            if action == "add":
-                favorites = get_favorite_addresses(user_id)
-                if len(favorites) >= 3:
-                    await update.message.reply_text("Можно сохранить не более 3 адресов")
-                else:
-                    add_favorite_address(user_id, text.strip())
-                    await update.message.reply_text("⭐ Адрес добавлен")
-                context.user_data.pop("awaiting_fav_action", None)
-                await send_profile_info(update.message, user_id, context)
-                return
-            elif action == "edit":
-                fav_id = context.user_data.get("fav_edit_id")
-                if fav_id:
-                    update_favorite_address(fav_id, user_id, text.strip())
-                    await update.message.reply_text("✏️ Адрес обновлён")
-                context.user_data.pop("awaiting_fav_action", None)
-                context.user_data.pop("fav_edit_id", None)
-                await send_profile_info(update.message, user_id, context)
-                return
-
         if text == "Профиль 👤":
             await profile(update, context)
         elif text == "Помощь ❓":
@@ -1189,7 +1166,10 @@ def main():
         elif text == "Заказать такси 🚖":
             await order_menu(update, context)
         elif text == "Назад ◀️":
-            await update.message.reply_text("Возврат в главное меню", reply_markup=main_menu_keyboard())
+            await update.message.reply_text(
+                "Возврат в главное меню",
+                reply_markup=main_menu_keyboard(update.effective_user.id),
+            )
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
