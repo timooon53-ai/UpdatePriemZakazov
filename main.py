@@ -485,8 +485,6 @@ async def options_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "edit_order":
         await query.message.reply_text("Вы можете изменить детское кресло, пожелания или комментарий.", reply_markup=options_keyboard())
         return WAIT_OPTIONS
-    elif data == "send_order":
-        return await confirm_order(update, context)
 
 async def child_seat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -586,6 +584,7 @@ async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    await query.answer()
 
     # Собираем все данные из context.user_data
     city = context.user_data['city']
@@ -624,46 +623,6 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-
-async def send_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    # Собираем все данные из context.user_data
-    city = context.user_data['city']
-    addresses = context.user_data.get('addresses', [])
-    tariff = context.user_data.get('tariff', 'Не указан')
-    child_seat = context.user_data.get('child_seat', None)
-    animal_transport = context.user_data.get('animal_transport', 0)
-    wheelchair_transport = context.user_data.get('wheelchair_transport', 0)
-    comment = context.user_data.get('comment', None)
-
-    # Проверяем, что есть хотя бы два адреса
-    if len(addresses) < 2:
-        await query.message.reply_text("Ошибка: необходимо хотя бы два адреса.")
-        return ConversationHandler.END
-
-    # Создаём заказ
-    order_id = create_order(
-        tg_id=update.effective_user.id,
-        type_="text",
-        city=city,
-        address_from=addresses[0],
-        address_to=addresses[-1],
-        address_three=addresses[1] if len(addresses) > 2 else None,
-        child_seat=child_seat,
-        animal_transport=animal_transport,
-        wheelchair_transport=wheelchair_transport,
-        comment=comment,
-        tariff=tariff
-    )
-
-    # Уведомляем администратора
-    await notify_admins(context, order_id)
-
-    await query.message.reply_text(f"✅ Ваш заказ №{order_id} отправлен!", reply_markup=main_menu_keyboard())
-    context.user_data.clear()
-    return ConversationHandler.END
 
 # ==========================
 # Админ уведомление
@@ -912,8 +871,8 @@ def main():
             ],
             WAIT_TARIFF: [CallbackQueryHandler(select_tariff, pattern="^tariff_.*$")],
             WAIT_OPTIONS: [
-                CallbackQueryHandler(options_callback, pattern="^(child_seat|preferences|comment|confirm_order|edit_order|send_order)$")
-                # Здесь confirm_order
+                CallbackQueryHandler(confirm_order, pattern="^send_order$"),
+                CallbackQueryHandler(options_callback, pattern="^(child_seat|preferences|comment|confirm_order|edit_order)$")
             ],
             WAIT_CHILD_SEAT: [CallbackQueryHandler(child_seat_callback,
                                                    pattern="^(seat_own|seat_9m_4y|seat_3_7y|seat_6_12y|back_to_options)$")],
@@ -926,6 +885,7 @@ def main():
         },
         fallbacks=[MessageHandler(filters.COMMAND, lambda u, c: ConversationHandler.END)],
         per_user=True,
+        per_message=True,
     )
 
     admin_conv_handler = ConversationHandler(
@@ -935,7 +895,8 @@ def main():
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
         },
         fallbacks=[],
-        per_user=True
+        per_user=True,
+        per_message=True
     )
 
     app.add_handler(conv_handler)
