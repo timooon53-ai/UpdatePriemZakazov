@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(DB_DIR, exist_ok=True)
 
+
 # ==========================
 # Инициализация БД
 # ==========================
@@ -83,6 +84,7 @@ def init_db():
         """)
         conn.commit()
 
+
 # ==========================
 # Работа с пользователями
 # ==========================
@@ -92,11 +94,13 @@ def add_user(tg_id, username):
         c.execute("INSERT OR IGNORE INTO users (tg_id, username) VALUES (?, ?)", (tg_id, username))
         conn.commit()
 
+
 def get_user(tg_id):
     with sqlite3.connect(USERS_DB) as conn:
         c = conn.cursor()
         c.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,))
         return c.fetchone()
+
 
 def update_balance(tg_id, amount):
     with sqlite3.connect(USERS_DB) as conn:
@@ -104,25 +108,30 @@ def update_balance(tg_id, amount):
         c.execute("UPDATE users SET balance = balance + ? WHERE tg_id=?", (amount, tg_id))
         conn.commit()
 
+
 def increment_orders_count(tg_id):
     with sqlite3.connect(USERS_DB) as conn:
         c = conn.cursor()
         c.execute("UPDATE users SET orders_count = orders_count + 1 WHERE tg_id=?", (tg_id,))
         conn.commit()
 
+
 # ==========================
 # Работа с заказами
 # ==========================
-def create_order(tg_id, type_, screenshot_path=None, city=None, address_from=None, address_to=None, comment=None, address_three=None, child_seat=None, animal_transport=0, wheelchair_transport=0, tariff=None):
+def create_order(tg_id, type_, screenshot_path=None, city=None, address_from=None, address_to=None, comment=None,
+                 address_three=None, child_seat=None, animal_transport=0, wheelchair_transport=0, tariff=None):
     with sqlite3.connect(ORDERS_DB) as conn:
         c = conn.cursor()
         c.execute("""
             INSERT INTO orders (tg_id, type, screenshot_path, city, address_from, address_to, comment, address_three, child_seat, animal_transport, wheelchair_transport, tariff)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (tg_id, type_, screenshot_path, city, address_from, address_to, comment, address_three, child_seat, animal_transport, wheelchair_transport, tariff))
+        """, (tg_id, type_, screenshot_path, city, address_from, address_to, comment, address_three, child_seat,
+              animal_transport, wheelchair_transport, tariff))
         order_id = c.lastrowid
         conn.commit()
         return order_id
+
 
 def get_order(order_id):
     with sqlite3.connect(ORDERS_DB) as conn:
@@ -130,17 +139,20 @@ def get_order(order_id):
         c.execute("SELECT * FROM orders WHERE id= ?", (order_id,))
         return c.fetchone()
 
+
 def update_order_status(order_id, status):
     with sqlite3.connect(ORDERS_DB) as conn:
         c = conn.cursor()
         c.execute("UPDATE orders SET status=?, updated_at=? WHERE id=?", (status, datetime.now(), order_id))
         conn.commit()
 
+
 def update_order_amount(order_id, amount):
     with sqlite3.connect(ORDERS_DB) as conn:
         c = conn.cursor()
         c.execute("UPDATE orders SET amount=?, updated_at=? WHERE id=?", (amount, datetime.now(), order_id))
         conn.commit()
+
 
 # ==========================
 # Декоратор проверки админа
@@ -153,7 +165,9 @@ def admin_only(func):
             await update.message.reply_text("❌ У вас нет прав администратора")
             return
         return await func(update, context)
+
     return wrapper
+
 
 # ==========================
 # Клавиатуры
@@ -166,8 +180,10 @@ def main_menu_keyboard():
     ]
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
+
 def back_keyboard():
     return ReplyKeyboardMarkup([[KeyboardButton("Назад ◀️")]], resize_keyboard=True)
+
 
 def order_type_keyboard():
     return InlineKeyboardMarkup([
@@ -176,11 +192,13 @@ def order_type_keyboard():
         [InlineKeyboardButton("Назад ◀️", callback_data="order_back")]
     ])
 
+
 def admin_order_buttons(order_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Взял в работу ✅", callback_data=f"take_{order_id}"),
          InlineKeyboardButton("Отклонить ❌", callback_data=f"reject_{order_id}")]
     ])
+
 
 def admin_in_progress_buttons(order_id):
     return InlineKeyboardMarkup([
@@ -188,12 +206,14 @@ def admin_in_progress_buttons(order_id):
          InlineKeyboardButton("Отменить заказ ❎", callback_data=f"cancel_{order_id}")]
     ])
 
+
 def admin_search_buttons(order_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Связаться с заказчиком 💬", callback_data=f"chat_{order_id}")],
         [InlineKeyboardButton("Нашлась машина 🚘", callback_data=f"found_{order_id}"),
          InlineKeyboardButton("Отменить поиск ⏹", callback_data=f"cancelsearch_{order_id}")]
     ])
+
 
 # ==========================
 # Геокодирование
@@ -212,6 +232,7 @@ def geocode(address):
         logger.error(f"Geocode error: {e}")
         return None
 
+
 # ==========================
 # Обработчики команд
 # ==========================
@@ -226,6 +247,7 @@ def not_banned(func):
                 await update.message.reply_text("❌ Вы заблокированы и не можете использовать бота.")
                 return
         return await func(update, context)
+
     return wrapper
 
 
@@ -237,6 +259,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Привет, @{user.username or 'не указан'}! Добро пожеловать в сервис заказа такси 🚖",
         reply_markup=main_menu_keyboard()
     )
+
 
 async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -252,9 +275,10 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Баланс: {balance:.2f} ₽\n"
         f"Заказано поездок: {orders_count}\n"
         f"Коэффициент: {coefficient:.2f}"
-        
+
     )
     await update.message.reply_text(text, reply_markup=back_keyboard())
+
 
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -271,19 +295,22 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================
 # Conversation States
 # ==========================
-(WAIT_SCREENSHOT, WAIT_SCREENSHOT_COMMENT, WAIT_CITY, WAIT_ADDRESS_FROM, WAIT_ADDRESS_TO, WAIT_ADD_ANOTHER_ADDRESS, WAIT_COMMENT, WAIT_TARIFF, WAIT_ADMIN_MESSAGE, WAIT_ADMIN_SUM, WAIT_OPTIONS, WAIT_CHILD_SEAT, WAIT_PREFERENCES) = range(13)
-
+(WAIT_SCREENSHOT, WAIT_SCREENSHOT_COMMENT, WAIT_CITY, WAIT_ADDRESS_FROM, WAIT_ADDRESS_TO, WAIT_ADD_ANOTHER_ADDRESS,
+ WAIT_COMMENT, WAIT_TARIFF, WAIT_ADMIN_MESSAGE, WAIT_ADMIN_SUM, WAIT_OPTIONS, WAIT_CHILD_SEAT,
+ WAIT_PREFERENCES) = range(13)
 
 # Новые состояния
 WAIT_OPTIONS = 9
 WAIT_CHILD_SEAT = 10
 WAIT_PREFERENCES = 11
 
+
 # ==========================
 # Пользовательский сценарий заказа
 # ==========================
 async def order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Выберите способ заказа:", reply_markup=order_type_keyboard())
+
 
 async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -299,9 +326,11 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.message.reply_text("Возврат в главное меню", reply_markup=main_menu_keyboard())
         return ConversationHandler.END
 
+
 # ---- Клавиатура "Пропустить" ----
 def skip_keyboard():
     return ReplyKeyboardMarkup([[KeyboardButton("Пропустить ➡️")]], resize_keyboard=True)
+
 
 # ---- Скриншотный заказ (приём фото) ----
 async def screenshot_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -324,6 +353,7 @@ async def screenshot_receive(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("Комментарий 💬 или «Пропустить ➡️»", reply_markup=skip_keyboard())
     return WAIT_SCREENSHOT_COMMENT
 
+
 async def screenshot_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     comment = update.message.text
     if comment and comment.lower() == "пропустить ➡️":
@@ -340,17 +370,9 @@ async def screenshot_comment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         c.execute("UPDATE orders SET comment=? WHERE id=?", (comment, order_id))
         conn.commit()
 
-    # Выбор тарифа после комментария
-    tariff_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Эконом", callback_data="tariff_economy")],
-        [InlineKeyboardButton("Комфорт", callback_data="tariff_comfort")],
-        [InlineKeyboardButton("Комфорт+", callback_data="tariff_comfort_plus")],
-        [InlineKeyboardButton("Бизнес", callback_data="tariff_business")],
-        [InlineKeyboardButton("Премьер", callback_data="tariff_premium")],
-        [InlineKeyboardButton("Элит", callback_data="tariff_elite")]
-    ])
-    await update.message.reply_text("Выберите тариф такси:", reply_markup=tariff_keyboard)
+reply_markup=tariff_keyboard)
     return WAIT_TARIFF
+
 
 # ---- Текстовый заказ: последовательность шагов ----
 async def text_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -370,10 +392,11 @@ async def text_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Адрес куда 📍")
     return WAIT_ADDRESS_TO
 
+
 async def text_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['address_to'] = geocode(update.message.text) or update.message.text
     context.user_data['addresses'] = [context.user_data['address_from'], context.user_data['address_to']]
-    
+
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Да", callback_data="add_another_address"),
          InlineKeyboardButton("Нет", callback_data="no_additional_address")]
@@ -381,15 +404,16 @@ async def text_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Хотите добавить еще один адрес?", reply_markup=keyboard)
     return WAIT_ADD_ANOTHER_ADDRESS
 
+
 async def add_another_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
+
     # Добавляем новый адрес к списку
     new_address = query.message.text.replace("Хотите добавить еще один адрес?", "").strip()
     geocoded = geocode(new_address) or new_address
     context.user_data['addresses'].append(geocoded)
-    
+
     # Проверяем, не превысили ли лимит в 3 адреса
     if len(context.user_data['addresses']) >= 3:
         keyboard = InlineKeyboardMarkup([
@@ -397,7 +421,7 @@ async def add_another_address(update: Update, context: ContextTypes.DEFAULT_TYPE
         ])
         await query.message.reply_text("Вы добавили максимальное количество адресов (3).", reply_markup=keyboard)
         return WAIT_ADD_ANOTHER_ADDRESS
-    
+
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Да", callback_data="add_another_address"),
          InlineKeyboardButton("Нет", callback_data="no_additional_address")]
@@ -405,10 +429,11 @@ async def add_another_address(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.message.reply_text("Введите следующий адрес:")
     return WAIT_ADDRESS_TO
 
+
 async def no_additional_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
+
     # После завершения адресов предлагаем выбрать тариф
     tariff_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Эконом", callback_data="tariff_economy")],
@@ -420,6 +445,7 @@ async def no_additional_address(update: Update, context: ContextTypes.DEFAULT_TY
     ])
     await query.message.reply_text("Выберите тариф такси:", reply_markup=tariff_keyboard)
     return WAIT_TARIFF
+
 
 async def select_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -436,7 +462,7 @@ async def select_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     selected_tariff = tariff_map.get(query.data, "Не указан")
     context.user_data['tariff'] = selected_tariff
-    
+
     # Добавляем инициализацию данных для дополнительных опций
     if 'child_seat' not in context.user_data:
         context.user_data['child_seat'] = None
@@ -444,7 +470,7 @@ async def select_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['animal_transport'] = 0
     if 'wheelchair_transport' not in context.user_data:
         context.user_data['wheelchair_transport'] = 0
-    
+
     # Предлагаем выбрать дополнительные опции
     options_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("👶 Детское кресло", callback_data="child_seat")],
@@ -470,6 +496,7 @@ async def options_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
         return WAIT_ADMIN_MESSAGE
+
 
 async def child_seat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -506,7 +533,7 @@ async def preferences_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     data = query.data
-    
+
     if data == "back_to_options":
         # Возвращаемся к выбору опций
         options_keyboard = InlineKeyboardMarkup([
@@ -517,14 +544,14 @@ async def preferences_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         ])
         await query.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard)
         return WAIT_OPTIONS
-    
+
     else:
         # Сохраняем пожелания
         if data == "pref_animal":
             context.user_data['animal_transport'] = 1
         elif data == "pref_wheelchair":
             context.user_data['wheelchair_transport'] = 1
-        
+
         # Сообщаем о сохранении
         await query.message.reply_text("✅ Пожелание добавлено")
         options_keyboard = InlineKeyboardMarkup([
@@ -536,13 +563,14 @@ async def preferences_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard)
         return WAIT_OPTIONS
 
+
 async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     comment = update.message.text
     if comment and comment.lower() == "пропустить ➡️":
         comment = None
-    
+
     context.user_data['comment'] = comment
-    
+
     # После ввода комментария возвращаемся к опциям
     options_keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("👶 Детское кресло", callback_data="child_seat")],
@@ -553,12 +581,14 @@ async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Дополнительные опции:", reply_markup=options_keyboard)
     return WAIT_OPTIONS
 
+
 async def edit_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     # Перенаправляем пользователя обратно на этап выбора детского кресла
-    await query.message.reply_text("Вы можете изменить детское кресло, пожелания или комментарий.", reply_markup=options_keyboard())
+    await query.message.reply_text("Вы можете изменить детское кресло, пожелания или комментарий.",
+                                   reply_markup=options_keyboard())
     return WAIT_OPTIONS
 
 
@@ -641,7 +671,6 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-
 async def send_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -681,6 +710,7 @@ async def send_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.reply_text(f"✅ Ваш заказ №{order_id} отправлен!", reply_markup=main_menu_keyboard())
     context.user_data.clear()
     return ConversationHandler.END
+
 
 # ==========================
 # Админ уведомление
@@ -857,7 +887,6 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-
 @admin_only
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from datetime import timedelta
@@ -888,6 +917,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💸 Заработок за всё время: {total_sum:.2f} ₽"
     )
     await update.message.reply_text(text, parse_mode="HTML")
+
 
 @admin_only
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -974,7 +1004,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     # CallbackQueryHandler для админа
-    #app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|found_|chat_)"))
+    # app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|found_|chat_)"))
 
     logger.info("Бот запущен")
     app.run_polling()
