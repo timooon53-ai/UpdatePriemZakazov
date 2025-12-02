@@ -902,6 +902,7 @@ def main():
                 MessageHandler(filters.Regex("^Да$"), add_another_address),
                 MessageHandler(filters.Regex("^Нет$"), no_additional_address),
             ],
+            WAIT_TARIFF: [MessageHandler(filters.Regex(r"^(Эконом|Комфорт|Комфорт\+|Бизнес|Премьер|Элит)$"), select_tariff)],
             WAIT_TARIFF: [MessageHandler(filters.Regex("^(Эконом|Комфорт|Комфорт\+|Бизнес|Премьер|Элит)$"), select_tariff)],
             WAIT_OPTIONS: [
                 MessageHandler(filters.Regex("^Отправить заказ$"), confirm_order),
