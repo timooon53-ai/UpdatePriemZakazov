@@ -166,6 +166,12 @@ def update_balance(tg_id, amount):
         c.execute("UPDATE users SET balance = balance + ? WHERE tg_id=?", (amount, tg_id))
         conn.commit()
 
+def set_balance(tg_id, value):
+    with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET balance = ? WHERE tg_id=?", (value, tg_id))
+        conn.commit()
+
 def increment_orders_count(tg_id):
     with sqlite3.connect(USERS_DB) as conn:
         c = conn.cursor()
@@ -634,9 +640,10 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WAIT_ADMIN_MESSAGE,
     WAIT_ADMIN_SUM,
     WAIT_ADMIN_BALANCE,
+    WAIT_ADMIN_BALANCE_UPDATE,
     WAIT_ADMIN_ORDERS,
     WAIT_ADMIN_BROADCAST,
-) = range(16)
+) = range(17)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -1145,7 +1152,35 @@ async def admin_balance_lookup(update: Update, context: ContextTypes.DEFAULT_TYP
         f"Баланс: {user.get('balance', 0):.2f} ₽\n"
         f"Коэффициент: {user.get('coefficient', 1):.2f}"
     )
-    await update.message.reply_text(text, reply_markup=admin_panel_keyboard())
+    context.user_data['balance_edit_id'] = target_id
+    await update.message.reply_text(
+        text + "\n\nВведите новый баланс (можно использовать дробный формат).",
+        reply_markup=admin_panel_keyboard(),
+    )
+    return WAIT_ADMIN_BALANCE_UPDATE
+
+
+async def admin_balance_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_id = context.user_data.get('balance_edit_id')
+    if not target_id:
+        await update.message.reply_text("❌ Пользователь не выбран", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+
+    text = update.message.text.replace(" ", "").replace(",", ".")
+    try:
+        new_balance = float(text)
+    except ValueError:
+        await update.message.reply_text("❌ Некорректное число, введите баланс заново")
+        return WAIT_ADMIN_BALANCE_UPDATE
+
+    set_balance(target_id, new_balance)
+    user = get_user(target_id)
+    context.user_data.pop('balance_edit_id', None)
+
+    await update.message.reply_text(
+        f"✅ Баланс пользователя @{user.get('username') or 'не указан'} обновлён: {new_balance:.2f} ₽",
+        reply_markup=admin_panel_keyboard(),
+    )
     return ConversationHandler.END
 
 
@@ -1317,6 +1352,7 @@ def main():
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
             WAIT_ADMIN_BALANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_balance_lookup)],
+            WAIT_ADMIN_BALANCE_UPDATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_balance_update)],
             WAIT_ADMIN_ORDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_orders_lookup)],
             WAIT_ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast)],
         },
@@ -1329,7 +1365,7 @@ def main():
     app.add_handler(admin_conv_handler)
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|pay_balance_)"))
 
     # Меню пользователя
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
