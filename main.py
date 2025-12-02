@@ -586,7 +586,6 @@ async def comment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
 
     # Собираем все данные из context.user_data
     city = context.user_data['city']
