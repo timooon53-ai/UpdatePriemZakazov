@@ -678,9 +678,6 @@ def main():
         fallbacks=[MessageHandler(filters.COMMAND, lambda u, c: ConversationHandler.END)],
         per_user=True,
     )
-        fallbacks=[],
-        per_user=True,
-    )
 
     admin_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_)")],
