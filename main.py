@@ -267,9 +267,9 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================
 (
     WAIT_SCREENSHOT, WAIT_SCREENSHOT_COMMENT,
-    WAIT_CITY, WAIT_ADDRESS_FROM, WAIT_ADDRESS_TO, WAIT_COMMENT,
+    WAIT_CITY, WAIT_ADDRESS_FROM, WAIT_ADDRESS_TO, WAIT_ADD_ANOTHER_ADDRESS, WAIT_COMMENT, WAIT_TARIFF,
     WAIT_ADMIN_MESSAGE, WAIT_ADMIN_SUM
-) = range(8)
+) = range(10)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -332,13 +332,17 @@ async def screenshot_comment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         c.execute("UPDATE orders SET comment=? WHERE id=?", (comment, order_id))
         conn.commit()
 
-    increment_orders_count(update.effective_user.id)
-    await update.message.reply_text(f"✅ Ваш заказ №{order_id} создан", reply_markup=main_menu_keyboard())
-    await notify_admins(context, order_id)
-
-    # очистка состояния пользователя
-    context.user_data.clear()
-    return ConversationHandler.END
+    # Выбор тарифа после комментария
+    tariff_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Эконом", callback_data="tariff_economy")],
+        [InlineKeyboardButton("Комфорт", callback_data="tariff_comfort")],
+        [InlineKeyboardButton("Комфорт+", callback_data="tariff_comfort_plus")],
+        [InlineKeyboardButton("Бизнес", callback_data="tariff_business")],
+        [InlineKeyboardButton("Премьер", callback_data="tariff_premium")],
+        [InlineKeyboardButton("Элит", callback_data="tariff_elite")]
+    ])
+    await update.message.reply_text("Выберите тариф такси:", reply_markup=tariff_keyboard)
+    return WAIT_TARIFF
 
 # ---- Текстовый заказ: последовательность шагов ----
 async def text_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -354,39 +358,87 @@ async def text_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def text_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['address_to'] = geocode(update.message.text) or update.message.text
-    await update.message.reply_text("Комментарий 💬 или «Пропустить ➡️»", reply_markup=skip_keyboard())
-    return WAIT_COMMENT
+    context.user_data['addresses'] = [context.user_data['address_from'], context.user_data['address_to']]
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Да", callback_data="add_another_address"),
+         InlineKeyboardButton("Нет", callback_data="no_additional_address")]
+    ])
+    await update.message.reply_text("Хотите добавить еще один адрес?", reply_markup=keyboard)
+    return WAIT_ADD_ANOTHER_ADDRESS
 
-async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # финальный шаг: только здесь создаём запись заказа
-    comment = update.message.text
-    if comment and comment.lower() == "пропустить ➡️":
-        comment = None
+async def add_another_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    # Добавляем новый адрес к списку
+    new_address = query.message.text.replace("Хотите добавить еще один адрес?", "").strip()
+    geocoded = geocode(new_address) or new_address
+    context.user_data['addresses'].append(geocoded)
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Да", callback_data="add_another_address"),
+         InlineKeyboardButton("Нет", callback_data="no_additional_address")]
+    ])
+    await query.message.reply_text("Введите следующий адрес:")
+    return WAIT_ADDRESS_TO
 
-    data = context.user_data
-    # проверяем, что необходимые поля есть
-    city = data.get('city')
-    addr_from = data.get('address_from')
-    addr_to = data.get('address_to')
+async def no_additional_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    # После завершения адресов предлагаем выбрать тариф
+    tariff_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Эконом", callback_data="tariff_economy")],
+        [InlineKeyboardButton("Комфорт", callback_data="tariff_comfort")],
+        [InlineKeyboardButton("Комфорт+", callback_data="tariff_comfort_plus")],
+        [InlineKeyboardButton("Бизнес", callback_data="tariff_business")],
+        [InlineKeyboardButton("Премьер", callback_data="tariff_premium")],
+        [InlineKeyboardButton("Элит", callback_data="tariff_elite")]
+    ])
+    await query.message.reply_text("Выберите тариф такси:", reply_markup=tariff_keyboard)
+    return WAIT_TARIFF
 
-    if not (city and addr_from and addr_to):
-        await update.message.reply_text("Ошибка: не все поля введены. Попробуйте снова.", reply_markup=main_menu_keyboard())
-        context.user_data.clear()
+async def select_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    # Сохраняем выбранный тариф
+    tariff_map = {
+        "tariff_economy": "Эконом",
+        "tariff_comfort": "Комфорт",
+        "tariff_comfort_plus": "Комфорт+",
+        "tariff_business": "Бизнес",
+        "tariff_premium": "Премьер",
+        "tariff_elite": "Элит"
+    }
+    selected_tariff = tariff_map.get(query.data, "Не указан")
+    context.user_data['tariff'] = selected_tariff
+
+    # Формируем финальный заказ
+    city = context.user_data['city']
+    addresses = context.user_data.get('addresses', [])
+    comment = context.user_data.get('comment')
+
+    if len(addresses) >= 2:
+        address_from = addresses[0]
+        address_to = addresses[-1]
+    else:
+        await query.message.reply_text("Ошибка: необходимо хотя бы два адреса.")
         return ConversationHandler.END
 
     order_id = create_order(
         tg_id=update.effective_user.id,
         type_="text",
         city=city,
-        address_from=addr_from,
-        address_to=addr_to,
+        address_from=address_from,
+        address_to=address_to,
         comment=comment
     )
 
     increment_orders_count(update.effective_user.id)
-    await update.message.reply_text(f"✅ Ваш заказ №{order_id} создан", reply_markup=main_menu_keyboard())
+    await query.message.reply_text(f"✅ Ваш заказ №{order_id} создан", reply_markup=main_menu_keyboard())
     await notify_admins(context, order_id)
-
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -405,6 +457,7 @@ async def notify_admins(context, order_id):
     address_from = order[5]
     address_to = order[6]
     comment = order[7]
+    screenshot_path = order[3]
 
     text = (
         f"НОВЫЙ ЗАКАЗ №{order_id}\n"
@@ -418,7 +471,20 @@ async def notify_admins(context, order_id):
 
     for admin_id in ADMIN_IDS:
         try:
-            await context.bot.send_message(admin_id, text, reply_markup=admin_order_buttons(order_id))
+            if screenshot_path and os.path.exists(screenshot_path):
+                with open(screenshot_path, 'rb') as photo:
+                    await context.bot.send_photo(
+                        chat_id=admin_id,
+                        photo=photo,
+                        caption=text,
+                        reply_markup=admin_order_buttons(order_id)
+                    )
+            else:
+                await context.bot.send_message(
+                    admin_id,
+                    text,
+                    reply_markup=admin_order_buttons(order_id)
+                )
         except Exception as e:
             logger.error(f"Ошибка уведомления админа {admin_id}: {e}")
 
@@ -603,8 +669,15 @@ def main():
             WAIT_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_city)],
             WAIT_ADDRESS_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_address_from)],
             WAIT_ADDRESS_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_address_to)],
-            WAIT_COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_comment)],
+            WAIT_ADD_ANOTHER_ADDRESS: [
+                CallbackQueryHandler(add_another_address, pattern="^add_another_address$"),
+                CallbackQueryHandler(no_additional_address, pattern="^no_additional_address$")
+            ],
+            WAIT_TARIFF: [CallbackQueryHandler(select_tariff, pattern="^tariff_.*$")],
         },
+        fallbacks=[MessageHandler(filters.COMMAND, lambda u, c: ConversationHandler.END)],
+        per_user=True,
+    )
         fallbacks=[],
         per_user=True,
     )
