@@ -932,6 +932,7 @@ def main():
         },
         fallbacks=[MessageHandler(filters.COMMAND, lambda u, c: ConversationHandler.END)],
         per_user=True,
+        per_message=True,
     )
 
     admin_conv_handler = ConversationHandler(
@@ -942,6 +943,7 @@ def main():
         },
         fallbacks=[],
         per_user=True,
+        per_message=True
     )
 
     app.add_handler(conv_handler)

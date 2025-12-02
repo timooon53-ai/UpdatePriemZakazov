@@ -903,6 +903,7 @@ def main():
                 MessageHandler(filters.Regex("^Нет$"), no_additional_address),
             ],
             WAIT_TARIFF: [MessageHandler(filters.Regex(r"^(Эконом|Комфорт|Комфорт\+|Бизнес|Премьер|Элит)$"), select_tariff)],
+            WAIT_TARIFF: [MessageHandler(filters.Regex("^(Эконом|Комфорт|Комфорт\+|Бизнес|Премьер|Элит)$"), select_tariff)],
             WAIT_OPTIONS: [
                 MessageHandler(filters.Regex("^Отправить заказ$"), confirm_order),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, options_callback),
@@ -917,6 +918,7 @@ def main():
         },
         fallbacks=[MessageHandler(filters.COMMAND, lambda u, c: ConversationHandler.END)],
         per_user=True,
+        per_message=True,
     )
 
     admin_conv_handler = ConversationHandler(
@@ -927,6 +929,7 @@ def main():
         },
         fallbacks=[],
         per_user=True,
+        per_message=True
     )
 
     app.add_handler(conv_handler)
