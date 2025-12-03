@@ -1,6 +1,5 @@
 from cfg import *
 import os
-import asyncio
 import sqlite3
 import logging
 import requests
@@ -1339,7 +1338,7 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================
 # Основной запуск
 # ==========================
-async def main():
+def main():
     init_db()
     app = ApplicationBuilder().token(TOKEN).build()
 
@@ -1455,8 +1454,8 @@ async def main():
     #app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|found_|chat_)"))
 
     logger.info("Бот запущен")
-    await app.run_polling()
+    app.run_polling()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
