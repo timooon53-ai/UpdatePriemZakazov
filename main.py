@@ -262,6 +262,18 @@ def get_user_orders(tg_id, limit=5):
         )
         return c.fetchall()
 
+
+def get_latest_user_order(tg_id):
+    with sqlite3.connect(ORDERS_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute(
+            "SELECT * FROM orders WHERE tg_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (tg_id,),
+        )
+        row = c.fetchone()
+        return dict(row) if row else None
+
 # ==========================
 # Работа с заказами
 # ==========================
@@ -419,6 +431,7 @@ def main_menu_keyboard(user_id=None):
     buttons = [
         [KeyboardButton("Профиль 👤")],
         [KeyboardButton("Заказать такси 🚖")],
+        [KeyboardButton("Узнать цену 💰")],
         [KeyboardButton("Помощь ❓")],
     ]
     if user_id in ADMIN_IDS:
@@ -467,6 +480,13 @@ def order_type_keyboard():
         [InlineKeyboardButton("Отправить скриншотом 🖼️", callback_data="order_screenshot")],
         [InlineKeyboardButton("Отправить текстом 📝", callback_data="order_text")],
         [InlineKeyboardButton("Назад ◀️", callback_data="order_back")]
+    ])
+
+
+def price_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Ввести точку А", callback_data="price_enter_a")],
+        [InlineKeyboardButton("Отменить", callback_data="price_cancel")],
     ])
 
 
@@ -768,6 +788,10 @@ async def order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("Выберите способ заказа:", reply_markup=order_type_keyboard())
 
+
+async def price_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Выберите действие:", reply_markup=price_keyboard())
+
 async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -798,6 +822,70 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=main_menu_keyboard(query.from_user.id),
         )
         return ConversationHandler.END
+
+# ---- Просмотр цены ----
+async def price_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_id = query.from_user.id
+
+    if data == "price_cancel":
+        await query.message.reply_text(
+            "Возврат в главное меню", reply_markup=main_menu_keyboard(user_id)
+        )
+        return ConversationHandler.END
+
+    if data != "price_enter_a":
+        return ConversationHandler.END
+
+    order = get_latest_user_order(user_id)
+    if not order:
+        await query.message.reply_text(
+            "❗ Сначала оформите заказ, чтобы узнать цену.",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return ConversationHandler.END
+
+    tariff = (order.get("tariff") or "").strip().lower()
+    tariff_map = {
+        "эконом": "econom",
+        "комфорт": "business",
+        "комфорт+": "comfortplus",
+        "бизнес": "vip",
+        "премьер": "premier",
+        "элит": "maybach",
+    }
+    class_code = tariff_map.get(tariff, "econom")
+
+    price_value = order.get("base_amount") or order.get("amount")
+    try:
+        price_value = float(price_value) if price_value is not None else None
+    except (TypeError, ValueError):
+        price_value = None
+
+    if price_value is None:
+        await query.message.reply_text(
+            "Цена пока не рассчитана. Попробуйте позже.",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return ConversationHandler.END
+
+    half_price = round(price_value / 2, 2)
+
+    context.user_data['last_price_check'] = {
+        "title_a": order.get("address_from"),
+        "title_b": order.get("address_to"),
+        "class": class_code,
+        "price": price_value,
+        "half_price": half_price,
+    }
+
+    await query.message.reply_text(
+        f"Цена в приложении: {price_value:.2f} ₽\nК оплате: {half_price:.2f} ₽",
+        reply_markup=main_menu_keyboard(user_id),
+    )
+    return ConversationHandler.END
 
 # ---- Клавиатура "Пропустить" ----
 def skip_keyboard():
@@ -1622,6 +1710,7 @@ def main():
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|pay_balance_|replacement_|admin_replacements)"))
+    app.add_handler(CallbackQueryHandler(price_callback, pattern="^price_"))
 
     # Меню пользователя
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1666,6 +1755,8 @@ def main():
             await profile(update, context)
         elif text == "Помощь ❓":
             await help_menu(update, context)
+        elif text == "Узнать цену 💰":
+            await price_menu(update, context)
         elif text == "Заказать такси 🚖":
             await order_menu(update, context)
         elif text == "Назад ◀️":
