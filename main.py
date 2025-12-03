@@ -586,7 +586,6 @@ def replacement_fields_keyboard(info):
 
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(mark(info.get("order_number"), "OrderID"), callback_data=f"replacement_field_orderid_{info['id']}")],
-        [InlineKeyboardButton(mark(info.get("token2"), "token2"), callback_data=f"replacement_field_token2_{info['id']}")],
         [InlineKeyboardButton(mark(info.get("card_x"), "card-x"), callback_data=f"replacement_field_cardx_{info['id']}")],
         [InlineKeyboardButton(mark(info.get("external_id"), "ID"), callback_data=f"replacement_field_extid_{info['id']}")],
         [InlineKeyboardButton(mark(info.get("link"), "Ссылка"), callback_data=f"replacement_field_link_{info['id']}")],
@@ -799,7 +798,6 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================
 (
     WAIT_SCREENSHOT,
-    WAIT_TOKEN2,
     WAIT_CITY,
     WAIT_ADDRESS_FROM,
     WAIT_ADDRESS_TO,
@@ -816,7 +814,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WAIT_ADMIN_BALANCE_UPDATE,
     WAIT_ADMIN_ORDERS,
     WAIT_ADMIN_BROADCAST,
-) = range(18)
+) = range(17)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -846,40 +844,22 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return WAIT_SCREENSHOT
     elif data == "order_text":
         context.user_data['order_type'] = "text"
-        context.user_data['awaiting_token2_for'] = "order"
+        saved_user = get_user(query.from_user.id)
+        if saved_user and saved_user.get("city"):
+            context.user_data.setdefault('order_data', {})['city'] = saved_user.get("city")
+            await ask_address_from(query, context)
+            return WAIT_ADDRESS_FROM
         await query.message.reply_text(
-            "Введите token2 (или отправьте новый, чтобы обновить):",
+            "Введите город 🏙️",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="order_back")]]),
         )
-        return WAIT_TOKEN2
+        return WAIT_CITY
     elif data == "order_back":
         await query.message.reply_text(
             "Возврат в главное меню",
             reply_markup=main_menu_keyboard(query.from_user.id),
         )
         return ConversationHandler.END
-
-# ---- Просмотр цены ----
-async def token2_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    token = (update.message.text or "").strip()
-    if not token:
-        await update.message.reply_text("Введите корректный token2:")
-        return WAIT_TOKEN2
-
-    set_active_token2(token, update.effective_user.id)
-    next_step = context.user_data.pop("awaiting_token2_for", None)
-
-    if next_step == "order":
-        saved_user = get_user(update.effective_user.id)
-        if saved_user and saved_user.get("city"):
-            context.user_data.setdefault('order_data', {})['city'] = saved_user.get("city")
-            await ask_address_from(update, context)
-            return WAIT_ADDRESS_FROM
-        await update.message.reply_text("Введите город 🏙️")
-        return WAIT_CITY
-
-    await update.message.reply_text("token2 обновлён.")
-    return ConversationHandler.END
 
 # ---- Клавиатура "Пропустить" ----
 def skip_keyboard():
@@ -1208,7 +1188,6 @@ def replacement_info_text(info):
         f"Создан: {info.get('created_at') or '—'}",
         f"Заказчик: @{username or 'не указан'} (ID: {info.get('tg_id') or '—'})",
         f"OrderID: {info.get('order_number') or '—'}",
-        f"token2: {info.get('token2') or '—'}",
         f"card-x: {info.get('card_x') or '—'}",
         f"ID: {info.get('external_id') or '—'}",
         f"Ссылка: {info.get('link') or '—'}",
@@ -1380,7 +1359,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['replacement_info_id'] = info_id
         prompts = {
             "orderid": "Пришлите OrderID",
-            "token2": "Пришлите token2",
             "cardx": "Пришлите card-x",
             "extid": "Пришлите ID",
             "link": "Пришлите ссылку",
@@ -1443,7 +1421,6 @@ async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_T
     value = update.message.text.strip()
     mapping = {
         "orderid": "order_number",
-        "token2": "token2",
         "cardx": "card_x",
         "extid": "external_id",
         "link": "link",
@@ -1659,7 +1636,6 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(order_type_callback, pattern="^order_")],
         states={
-            WAIT_TOKEN2: [MessageHandler(filters.TEXT & ~filters.COMMAND, token2_input)],
             WAIT_SCREENSHOT: [MessageHandler(filters.PHOTO, screenshot_receive)],
             WAIT_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_city)],
             WAIT_ADDRESS_FROM: [
@@ -1711,12 +1687,6 @@ def main():
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         user_id = update.effective_user.id
-
-        if context.user_data.get("awaiting_token2_for"):
-            result = await token2_input(update, context)
-            if result in {WAIT_CITY, WAIT_ADDRESS_FROM, WAIT_TOKEN2}:
-                return result
-            return
 
         if context.user_data.get("awaiting_city"):
             city = text.strip()
