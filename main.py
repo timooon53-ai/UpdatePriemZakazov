@@ -3,6 +3,9 @@ import os
 import sqlite3
 import logging
 import requests
+import re
+import time
+import uuid
 from datetime import datetime
 from functools import wraps
 
@@ -99,6 +102,35 @@ def init_db():
         for column, definition in new_columns.items():
             if column not in existing_columns:
                 c.execute(f"ALTER TABLE orders ADD COLUMN {column} {definition}")
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS orders_info (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER,
+                tg_id INTEGER,
+                order_number TEXT,
+                token2 TEXT,
+                card_x TEXT,
+                external_id TEXT,
+                link TEXT,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        info_columns = {row[1] for row in c.execute("PRAGMA table_info(orders_info)").fetchall()}
+        needed_info_columns = {
+            "order_number": "TEXT",
+            "token2": "TEXT",
+            "card_x": "TEXT",
+            "external_id": "TEXT",
+            "link": "TEXT",
+            "is_active": "INTEGER DEFAULT 1",
+            "tg_id": "INTEGER",
+        }
+        for column, definition in needed_info_columns.items():
+            if column not in info_columns:
+                c.execute(f"ALTER TABLE orders_info ADD COLUMN {column} {definition}")
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS favorite_addresses (
@@ -233,6 +265,18 @@ def get_user_orders(tg_id, limit=5):
         )
         return c.fetchall()
 
+
+def get_latest_user_order(tg_id):
+    with sqlite3.connect(ORDERS_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute(
+            "SELECT * FROM orders WHERE tg_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (tg_id,),
+        )
+        row = c.fetchone()
+        return dict(row) if row else None
+
 # ==========================
 # Работа с заказами
 # ==========================
@@ -320,6 +364,56 @@ def update_order_fields(order_id, **fields):
         )
         conn.commit()
 
+
+def create_order_info(order_id):
+    order = get_order(order_id)
+    tg_id = order.get("tg_id") if order else None
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO orders_info (order_id, tg_id, is_active) VALUES (?, ?, 1)",
+            (order_id, tg_id),
+        )
+        conn.commit()
+        return c.lastrowid
+
+
+def get_order_info(info_id):
+    with sqlite3.connect(ORDERS_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM orders_info WHERE id=?", (info_id,))
+        row = c.fetchone()
+        return dict(row) if row else None
+
+
+def list_active_order_infos():
+    with sqlite3.connect(ORDERS_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute(
+            "SELECT * FROM orders_info WHERE is_active=1 ORDER BY created_at DESC, id DESC",
+        )
+        return [dict(row) for row in c.fetchall()]
+
+
+def update_order_info_field(info_id, **fields):
+    if not fields:
+        return
+    placeholders = ", ".join([f"{key}=?" for key in fields.keys()])
+    values = list(fields.values()) + [info_id]
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(f"UPDATE orders_info SET {placeholders} WHERE id=?", values)
+        conn.commit()
+
+
+def deactivate_order_info(info_id):
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE orders_info SET is_active=0 WHERE id=?", (info_id,))
+        conn.commit()
+
 # ==========================
 # Декоратор проверки админа
 # ==========================
@@ -340,6 +434,7 @@ def main_menu_keyboard(user_id=None):
     buttons = [
         [KeyboardButton("Профиль 👤")],
         [KeyboardButton("Заказать такси 🚖")],
+        [KeyboardButton("Узнать цену 💰")],
         [KeyboardButton("Помощь ❓")],
     ]
     if user_id in ADMIN_IDS:
@@ -391,6 +486,186 @@ def order_type_keyboard():
     ])
 
 
+def price_class_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Эконом 💸", callback_data="price_class_econom"),
+            InlineKeyboardButton("Комфорт 😊", callback_data="price_class_business"),
+        ],
+        [
+            InlineKeyboardButton("Комфорт+ ✨", callback_data="price_class_comfortplus"),
+            InlineKeyboardButton("Бизнес 💼", callback_data="price_class_vip"),
+        ],
+        [
+            InlineKeyboardButton("Премьер 👑", callback_data="price_class_premier"),
+            InlineKeyboardButton("Элит 🏆", callback_data="price_class_maybach"),
+        ],
+        [InlineKeyboardButton("Отменить", callback_data="price_cancel")],
+    ])
+
+
+PRICE_CLASS_LABELS = {
+    "econom": "Эконом",
+    "business": "Комфорт",
+    "comfortplus": "Комфорт+",
+    "vip": "Бизнес",
+    "premier": "Премьер",
+    "maybach": "Элит",
+}
+
+
+def generate_reqid():
+    return f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:16]}"
+
+
+def get_active_token2():
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT token2 FROM orders_info
+            WHERE token2 IS NOT NULL AND token2 != '' AND is_active=1
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """
+        )
+        row = c.fetchone()
+        return row[0] if row else None
+
+
+def price_headers(token2):
+    return {
+        "User-Agent": "ru.yandex.ytaxi/700.116.0.501961 (iPhone; iPhone13,2; iOS 18.6; Darwin)",
+        "Accept": "*/*",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token2}",
+        "x-oauth-token": token2,
+    }
+
+
+def suggest_payload(part, point_type, class_code):
+    return {
+        "type": point_type,
+        "part": part,
+        "client_reqid": generate_reqid(),
+        "session_info": {},
+        "action": "user_input",
+        "state": {
+            "selected_class": class_code,
+            "coord_providers": [],
+            "location_available": False,
+            "precise_location_available": False,
+            "wifi_networks": [],
+            "fields": [],
+        },
+    }
+
+
+def extract_point(suggest_data):
+    suggestions = suggest_data.get("suggestions") or suggest_data.get("items") or []
+    if not suggestions:
+        return None, None
+    first = suggestions[0]
+    title = (
+        (first.get("title") or {}).get("text")
+        or first.get("value")
+        or (first.get("subtitle") or {}).get("text")
+    )
+    point = first.get("point") or first.get("position")
+    if isinstance(point, dict):
+        point = [point.get("lon"), point.get("lat")]
+    return title, point
+
+
+def request_suggest(address, point_type, class_code, token2):
+    url = (
+        "https://tc.mobile.yandex.net/4.0/persuggest/v1/suggest?"
+        "mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_V4_0"
+    )
+    response = requests.post(
+        url,
+        json=suggest_payload(address, point_type, class_code),
+        headers=price_headers(token2),
+        timeout=20,
+    )
+    response.raise_for_status()
+    return extract_point(response.json())
+
+
+def extract_price_value(response):
+    match = re.search(r'"max_price_as_decimal":"([0-9.]+)"', response.text)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            pass
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+
+    summary = data.get("summary") or {}
+    price_block = summary.get("price") or {}
+    value = price_block.get("value") or price_block.get("amount")
+    if value is not None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    price_str = data.get("max_price_as_decimal")
+    if price_str:
+        try:
+            return float(price_str)
+        except ValueError:
+            return None
+    return None
+
+
+def request_route_price(city, address_from, address_to, class_code):
+    token2 = get_active_token2()
+    if not token2:
+        raise ValueError("token2 отсутствует. Добавьте запись в orders_info.")
+
+    title_a, point_a = request_suggest(address_from, "a", class_code, token2)
+    title_b, point_b = request_suggest(address_to, "b", class_code, token2)
+
+    if not point_a or not point_b:
+        raise ValueError("Не удалось получить координаты для одного из адресов")
+
+    payload = {
+        "selected_class": class_code,
+        "format_currency": True,
+        "with_title": True,
+        "route": [point_a, point_b],
+        "zone_name": (city or "").lower() or "moscow",
+        "state": {
+            "fields": [
+                {"type": "a", "title": title_a or address_from, "position": point_a},
+                {"type": "b", "title": title_b or address_to, "position": point_b},
+            ]
+        },
+        "payment": {"type": "cash"},
+    }
+
+    route_url = (
+        "https://tc.mobile.yandex.net/3.0/routestats?"
+        "mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_0"
+    )
+    response = requests.post(route_url, json=payload, headers=price_headers(token2), timeout=20)
+    response.raise_for_status()
+
+    price_value = extract_price_value(response)
+    if price_value is None:
+        raise ValueError("Цена не найдена в ответе сервиса")
+
+    return {
+        "title_a": title_a or address_from,
+        "title_b": title_b or address_to,
+        "price": price_value,
+    }
+
+
 def yes_no_keyboard():
     return InlineKeyboardMarkup([
         [
@@ -408,34 +683,59 @@ def tariff_keyboard():
     ])
 
 
-def child_seat_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👶 Кресло", callback_data="seat_need")],
-        [InlineKeyboardButton("📝 Пожелания", callback_data="seat_wish")],
-        [InlineKeyboardButton("⏭️ Пропустить", callback_data="seat_skip")],
-    ])
-
-
 def child_seat_type_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🛄 Свое", callback_data="seat_type_Свое")],
         [InlineKeyboardButton("👶 9м - 4л", callback_data="seat_type_9м-4л")],
         [InlineKeyboardButton("🧒 3-7л", callback_data="seat_type_3-7л")],
         [InlineKeyboardButton("👦 6-12л", callback_data="seat_type_6-12л")],
-        [InlineKeyboardButton("🚪 Выйти", callback_data="seat_type_exit")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="seat_type_exit")],
     ])
 
 
-def wishes_keyboard(selected=None):
-    selected = selected or []
-    def label(option, text):
-        return f"{'✅' if option in selected else '⬜️'} {text}"
+def additional_options_keyboard(order_data):
+    selected_wishes = set(order_data.get("wishes", []))
+    child_seat = order_data.get("child_seat")
+    child_seat_type = order_data.get("child_seat_type")
+
+    def mark(text, active):
+        return f"{'✅' if active else '⬜️'} {text}"
+
+    child_selected = child_seat is not None and child_seat != "Не требуется"
+    child_label = "Детское кресло"
+    if child_selected:
+        detail = child_seat_type or child_seat
+        child_label = f"{child_label} ({detail})"
 
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(label("animals", "Перевозка животных 🐾"), callback_data="wish_animals")],
-        [InlineKeyboardButton(label("wheelchair", "Буду с инвалидным креслом ♿"), callback_data="wish_wheelchair")],
-        [InlineKeyboardButton("✅ Готово", callback_data="wish_done"), InlineKeyboardButton("⏭️ Пропустить", callback_data="wish_skip")],
+        [InlineKeyboardButton(mark(child_label, child_selected), callback_data="additional_child")],
+        [InlineKeyboardButton(mark("Перевозка животных 🐾", "Перевозка животных" in selected_wishes), callback_data="additional_animals")],
+        [InlineKeyboardButton(mark("Буду с инвалидным креслом ♿", "Буду с инвалидным креслом" in selected_wishes), callback_data="additional_wheelchair")],
+        [InlineKeyboardButton("✅ Готово", callback_data="additional_done"), InlineKeyboardButton("⏭️ Пропустить", callback_data="additional_skip")],
     ])
+
+
+def replacement_fields_keyboard(info):
+    def mark(value, label):
+        return f"{'✅' if value else '➕'} {label}"
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(mark(info.get("order_number"), "OrderID"), callback_data=f"replacement_field_orderid_{info['id']}")],
+        [InlineKeyboardButton(mark(info.get("token2"), "token2"), callback_data=f"replacement_field_token2_{info['id']}")],
+        [InlineKeyboardButton(mark(info.get("card_x"), "card-x"), callback_data=f"replacement_field_cardx_{info['id']}")],
+        [InlineKeyboardButton(mark(info.get("external_id"), "ID"), callback_data=f"replacement_field_extid_{info['id']}")],
+        [InlineKeyboardButton(mark(info.get("link"), "Ссылка"), callback_data=f"replacement_field_link_{info['id']}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="replacement_back")],
+    ])
+
+
+def replacement_list_keyboard(infos):
+    buttons = []
+    for info in infos:
+        label = f"{info.get('created_at', '')}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"replacement_view_{info['id']}")])
+    buttons.append([InlineKeyboardButton("⬅️ В админку", callback_data="replacement_back")])
+    return InlineKeyboardMarkup(buttons)
 
 def admin_order_buttons(order_id):
     return InlineKeyboardMarkup([
@@ -472,6 +772,7 @@ def admin_panel_keyboard():
         [InlineKeyboardButton("💳 Баланс пользователя", callback_data="admin_balance")],
         [InlineKeyboardButton("📦 Заказы пользователя", callback_data="admin_orders")],
         [InlineKeyboardButton("📢 Рассылка по всем", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("🔄 Заказы для подмены", callback_data="admin_replacements")],
         [InlineKeyboardButton(ordering_label, callback_data="admin_toggle")],
         [InlineKeyboardButton(status_text, callback_data="admin_status")],
     ])
@@ -522,6 +823,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Привет, @{user.username or 'не указан'}! Добро пожаловать в сервис заказа такси 🚖",
         reply_markup=main_menu_keyboard(user.id)
     )
+
+
+async def start_over(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сбросить любой сценарий и показать стартовое меню."""
+    context.user_data.clear()
+    return await start(update, context) or ConversationHandler.END
 
 async def send_profile_info(target, user_id, context):
     user = get_user(user_id)
@@ -633,17 +940,21 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WAIT_ADDRESS_THIRD_DECISION,
     WAIT_ADDRESS_THIRD,
     WAIT_TARIFF,
-    WAIT_CHILD_SEAT,
+    WAIT_ADDITIONAL,
     WAIT_CHILD_SEAT_TYPE,
-    WAIT_WISHES,
     WAIT_COMMENT,
+    WAIT_REPLACEMENT_FIELD,
     WAIT_ADMIN_MESSAGE,
     WAIT_ADMIN_SUM,
     WAIT_ADMIN_BALANCE,
     WAIT_ADMIN_BALANCE_UPDATE,
     WAIT_ADMIN_ORDERS,
     WAIT_ADMIN_BROADCAST,
-) = range(17)
+    WAIT_PRICE_CITY,
+    WAIT_PRICE_POINT_A,
+    WAIT_PRICE_POINT_B,
+    WAIT_PRICE_CLASS,
+) = range(21)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -656,6 +967,24 @@ async def order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     await update.message.reply_text("Выберите способ заказа:", reply_markup=order_type_keyboard())
+
+
+def reset_price_flow(context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("price_stage", None)
+    context.user_data.pop("price_query", None)
+
+
+def start_price_flow(context: ContextTypes.DEFAULT_TYPE):
+    reset_price_flow(context)
+    context.user_data["price_query"] = {}
+    context.user_data["price_stage"] = WAIT_PRICE_CITY
+
+
+async def price_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    start_price_flow(context)
+    await update.message.reply_text(
+        "Укажите город, в котором заказываете такси (или отправьте \"Отмена\" для выхода):"
+    )
 
 async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -687,6 +1016,74 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=main_menu_keyboard(query.from_user.id),
         )
         return ConversationHandler.END
+
+# ---- Просмотр цены ----
+async def price_class_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_id = query.from_user.id
+
+    if data == "price_cancel":
+        reset_price_flow(context)
+        await query.message.reply_text(
+            "Возврат в главное меню", reply_markup=main_menu_keyboard(user_id)
+        )
+        return ConversationHandler.END
+
+    if not data.startswith("price_class_"):
+        return ConversationHandler.END
+
+    if context.user_data.get("price_stage") != WAIT_PRICE_CLASS:
+        await query.message.reply_text(
+            "Пожалуйста, начните с пункта \"Узнать цену 💰\".",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return ConversationHandler.END
+
+    class_code = data.split("price_class_", 1)[1]
+    price_data = context.user_data.get("price_query", {})
+    city = price_data.get("city")
+    address_from = price_data.get("address_from")
+    address_to = price_data.get("address_to")
+
+    if not city or not address_from or not address_to:
+        reset_price_flow(context)
+        await query.message.reply_text(
+            "Не хватает данных для расчёта. Попробуйте снова.",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return ConversationHandler.END
+
+    try:
+        result = request_route_price(city, address_from, address_to, class_code)
+    except Exception as e:
+        logger.error(f"Не удалось рассчитать цену: {e}")
+        reset_price_flow(context)
+        await query.message.reply_text(
+            "Не удалось рассчитать цену. Попробуйте позже или проверьте введённые данные.",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return ConversationHandler.END
+
+    price_value = result.get("price")
+    half_price = round(price_value / 2, 2)
+    title_a = result.get("title_a", address_from)
+    title_b = result.get("title_b", address_to)
+
+    reset_price_flow(context)
+    await query.message.reply_text(
+        (
+            f"Город: {city}\n"
+            f"Откуда: {title_a}\n"
+            f"Куда: {title_b}\n"
+            f"Класс: {PRICE_CLASS_LABELS.get(class_code, class_code)}\n\n"
+            f"Цена в приложении: {price_value:.2f} ₽\n"
+            f"К оплате: {half_price:.2f} ₽"
+        ),
+        reply_markup=main_menu_keyboard(user_id),
+    )
+    return ConversationHandler.END
 
 # ---- Клавиатура "Пропустить" ----
 def skip_keyboard():
@@ -894,24 +1291,11 @@ async def tariff_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     tariff = query.data.split("_", 1)[1]
     context.user_data.setdefault('order_data', {})['tariff'] = tariff
-    await query.message.reply_text("Нужен ли детский кресло?", reply_markup=child_seat_keyboard())
-    return WAIT_CHILD_SEAT
-
-
-async def child_seat_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    choice = query.data
-    if choice == "seat_need":
-        context.user_data.setdefault('order_data', {})['child_seat'] = "Нужно"
-        await query.message.reply_text("Выберите тип кресла", reply_markup=child_seat_type_keyboard())
-        return WAIT_CHILD_SEAT_TYPE
-    elif choice == "seat_wish":
-        context.user_data.setdefault('order_data', {})['child_seat'] = "Пожелания"
-    else:
-        context.user_data.setdefault('order_data', {})['child_seat'] = "Не требуется"
-    await query.message.reply_text("Выберите пожелания", reply_markup=wishes_keyboard(context.user_data.get('order_data', {}).get('wishes')))
-    return WAIT_WISHES
+    await query.message.reply_text(
+        "Выберите доп. опции по необходимости",
+        reply_markup=additional_options_keyboard(context.user_data.get('order_data', {})),
+    )
+    return WAIT_ADDITIONAL
 
 
 async def child_seat_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -919,35 +1303,54 @@ async def child_seat_type_selected(update: Update, context: ContextTypes.DEFAULT
     await query.answer()
     data = query.data
     if data == "seat_type_exit":
-        await query.message.reply_text("Выберите пожелания", reply_markup=wishes_keyboard(context.user_data.get('order_data', {}).get('wishes')))
-        return WAIT_WISHES
+        await query.edit_message_text(
+            "Выберите доп. опции по необходимости",
+            reply_markup=additional_options_keyboard(context.user_data.get('order_data', {})),
+        )
+        return WAIT_ADDITIONAL
 
     seat_type = data.split("_", 2)[2]
-    context.user_data.setdefault('order_data', {})['child_seat_type'] = seat_type
-    await query.message.reply_text("Выберите пожелания", reply_markup=wishes_keyboard(context.user_data.get('order_data', {}).get('wishes')))
-    return WAIT_WISHES
+    order_data = context.user_data.setdefault('order_data', {})
+    order_data['child_seat'] = "Нужно"
+    order_data['child_seat_type'] = seat_type
+    await query.edit_message_text(
+        "Выберите доп. опции по необходимости",
+        reply_markup=additional_options_keyboard(order_data),
+    )
+    return WAIT_ADDITIONAL
 
-
-async def wishes_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def additional_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     order_data = context.user_data.setdefault('order_data', {})
     current_wishes = set(order_data.get('wishes', []))
 
-    if data == "wish_done" or data == "wish_skip":
-        await query.message.reply_text("Добавьте комментарий для админа или нажмите «Пропустить ➡️»", reply_markup=skip_keyboard())
+    if data == "additional_child":
+        await query.edit_message_text(
+            "Выберите тип детского кресла",
+            reply_markup=child_seat_type_keyboard(),
+        )
+        return WAIT_CHILD_SEAT_TYPE
+
+    if data in {"additional_animals", "additional_wheelchair"}:
+        label = "Перевозка животных" if data == "additional_animals" else "Буду с инвалидным креслом"
+        if label in current_wishes:
+            current_wishes.remove(label)
+        else:
+            current_wishes.add(label)
+        order_data['wishes'] = list(current_wishes)
+        await query.edit_message_reply_markup(reply_markup=additional_options_keyboard(order_data))
+        return WAIT_ADDITIONAL
+
+    if data in {"additional_done", "additional_skip"}:
+        await query.message.reply_text(
+            "Добавьте комментарий для админа или нажмите «Пропустить ➡️»",
+            reply_markup=skip_keyboard(),
+        )
         return WAIT_COMMENT
 
-    option = "animals" if data == "wish_animals" else "wheelchair"
-    label = "Перевозка животных" if option == "animals" else "Буду с инвалидным креслом"
-    if label in current_wishes:
-        current_wishes.remove(label)
-    else:
-        current_wishes.add(label)
-    order_data['wishes'] = list(current_wishes)
-    await query.edit_message_reply_markup(reply_markup=wishes_keyboard(order_data['wishes']))
-    return WAIT_WISHES
+    return WAIT_ADDITIONAL
 
 
 # ==========================
@@ -999,6 +1402,44 @@ async def notify_admins(context, order_id):
                 await context.bot.send_message(admin_id, text, reply_markup=admin_order_buttons(order_id))
         except Exception as e:
             logger.error(f"Ошибка уведомления админа {admin_id}: {e}")
+
+
+def replacement_info_text(info):
+    user = get_user(info.get("tg_id")) if info.get("tg_id") else None
+    username = user.get("username") if user else None
+    parts = [
+        f"🧩 Заказ для подмены #{info['id']}",
+        f"Создан: {info.get('created_at') or '—'}",
+        f"Заказчик: @{username or 'не указан'} (ID: {info.get('tg_id') or '—'})",
+        f"OrderID: {info.get('order_number') or '—'}",
+        f"token2: {info.get('token2') or '—'}",
+        f"card-x: {info.get('card_x') or '—'}",
+        f"ID: {info.get('external_id') or '—'}",
+        f"Ссылка: {info.get('link') or '—'}",
+        f"Связан с заказом №{info.get('order_id') or '—'}",
+    ]
+    return "\n".join(parts)
+
+
+async def notify_replacement_done(info, context):
+    tg_id = info.get("tg_id")
+    if not tg_id:
+        return
+    text = (
+        "✨ Поездка успешно завершена!\n\n"
+        "Спасибо, что выбрали нас.\n"
+        "📢 Канал: @FreeEatTaxi\n"
+        "🧑‍💼 Админ: @MikeWazovsk1y\n\n"
+        "Нажмите /start, чтобы вернуться в главное меню.\n"
+        "Поделитесь, пожалуйста, отзывом в чате — нам важно ваше мнение! 💬"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Оставить отзыв", url="https://t.me/+kE869Hcdm_w1OWVh")]
+    ])
+    try:
+        await context.bot.send_message(tg_id, text, reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Не удалось уведомить пользователя {tg_id} о завершении: {e}")
 
 
 # ==========================
@@ -1102,6 +1543,68 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_balance(tg_id, total)
         await context.bot.send_message(tg_id, f"💰 На ваш баланс начислено {total:.2f} ₽ за заказ №{order_id}")
         await query.message.reply_text("Баланс пользователя пополнен ✅")
+    elif data.startswith("replacement_offer_add_"):
+        order_id = int(data.rsplit("_", 1)[1])
+        info_id = create_order_info(order_id)
+        info = get_order_info(info_id)
+        await query.message.reply_text(
+            "Заполните данные заказа для подмены:",
+            reply_markup=replacement_fields_keyboard(info),
+        )
+    elif data.startswith("replacement_offer_skip_"):
+        await query.message.reply_text("Добавление заказа для подмены пропущено.")
+    elif data == "admin_replacements":
+        infos = list_active_order_infos()
+        if not infos:
+            await query.message.reply_text(
+                "Список заказов для подмены пуст", reply_markup=admin_panel_keyboard()
+            )
+            return ConversationHandler.END
+        await query.message.reply_text(
+            "Активные заказы для подмены:", reply_markup=replacement_list_keyboard(infos)
+        )
+    elif data.startswith("replacement_view_"):
+        info_id = int(data.rsplit("_", 1)[1])
+        info = get_order_info(info_id)
+        if not info:
+            await query.answer("Запись не найдена", show_alert=True)
+            return ConversationHandler.END
+        await query.message.reply_text(
+            replacement_info_text(info),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Назад", callback_data="replacement_back")],
+                [InlineKeyboardButton("Завершить заказ ✅", callback_data=f"replacement_finish_{info_id}")],
+            ]),
+        )
+    elif data.startswith("replacement_field_"):
+        parts = data.split("_")
+        field_key = parts[2]
+        info_id = int(parts[3])
+        context.user_data['replacement_field'] = field_key
+        context.user_data['replacement_info_id'] = info_id
+        prompts = {
+            "orderid": "Пришлите OrderID",
+            "token2": "Пришлите token2",
+            "cardx": "Пришлите card-x",
+            "extid": "Пришлите ID",
+            "link": "Пришлите ссылку",
+        }
+        await query.message.reply_text(prompts.get(field_key, "Пришлите значение"))
+        return WAIT_REPLACEMENT_FIELD
+    elif data == "replacement_back":
+        await admin_show_panel(query.message)
+        return ConversationHandler.END
+    elif data.startswith("replacement_finish_"):
+        info_id = int(data.rsplit("_", 1)[1])
+        info = get_order_info(info_id)
+        if not info:
+            await query.answer("Запись не найдена", show_alert=True)
+            return ConversationHandler.END
+        deactivate_order_info(info_id)
+        await notify_replacement_done(info, context)
+        await query.message.reply_text(
+            "Заказ для подмены завершён и убран из списка.", reply_markup=admin_panel_keyboard()
+        )
     elif data == "admin_balance":
         await query.message.reply_text("Введите Telegram ID пользователя для просмотра баланса:")
         return WAIT_ADMIN_BALANCE
@@ -1132,6 +1635,37 @@ async def admin_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await context.bot.send_message(tg_id, f"💬 Сообщение от администратора:\n{text}")
     await update.message.reply_text("Сообщение отправлено. Теперь введите сумму заказа (₽):")
     return WAIT_ADMIN_SUM
+
+
+async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    info_id = context.user_data.get('replacement_info_id')
+    field_key = context.user_data.get('replacement_field')
+    if not info_id or not field_key:
+        await update.message.reply_text("Запись не выбрана", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+
+    value = update.message.text.strip()
+    mapping = {
+        "orderid": "order_number",
+        "token2": "token2",
+        "cardx": "card_x",
+        "extid": "external_id",
+        "link": "link",
+    }
+    column = mapping.get(field_key)
+    if not column:
+        await update.message.reply_text("Неизвестное поле", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+
+    update_order_info_field(info_id, **{column: value})
+    context.user_data.pop('replacement_info_id', None)
+    context.user_data.pop('replacement_field', None)
+
+    info = get_order_info(info_id)
+    await update.message.reply_text(
+        "Сохранено", reply_markup=replacement_fields_keyboard(info)
+    )
+    return ConversationHandler.END
 
 
 async def admin_balance_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1253,6 +1787,14 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=payment_choice_keyboard(order_id),
     )
 
+    await update.message.reply_text(
+        "Добавить заказ для подмены?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Добавить", callback_data=f"replacement_offer_add_{order_id}")],
+            [InlineKeyboardButton("Нет", callback_data=f"replacement_offer_skip_{order_id}")],
+        ]),
+    )
+
     return ConversationHandler.END
 
 
@@ -1336,18 +1878,17 @@ def main():
                 CallbackQueryHandler(favorite_address_callback, pattern="^fav_third_"),
             ],
             WAIT_TARIFF: [CallbackQueryHandler(tariff_selected, pattern="^tariff_")],
-            WAIT_CHILD_SEAT: [CallbackQueryHandler(child_seat_selected, pattern="^seat_")],
+            WAIT_ADDITIONAL: [CallbackQueryHandler(additional_selected, pattern="^additional_")],
             WAIT_CHILD_SEAT_TYPE: [CallbackQueryHandler(child_seat_type_selected, pattern="^seat_type_")],
-            WAIT_WISHES: [CallbackQueryHandler(wishes_selected, pattern="^wish_")],
             WAIT_COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_comment)],
         },
-        fallbacks=[],
+        fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
         per_message=False,
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_balance|admin_orders|admin_broadcast|admin_toggle|admin_status)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_balance|admin_orders|admin_broadcast|admin_toggle|admin_status|admin_replacements|replacement_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
@@ -1355,8 +1896,9 @@ def main():
             WAIT_ADMIN_BALANCE_UPDATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_balance_update)],
             WAIT_ADMIN_ORDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_orders_lookup)],
             WAIT_ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast)],
+            WAIT_REPLACEMENT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_replacement_save)],
         },
-        fallbacks=[],
+        fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
         per_message=False,
     )
@@ -1365,12 +1907,59 @@ def main():
     app.add_handler(admin_conv_handler)
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|pay_balance_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|pay_balance_|replacement_|admin_replacements)"))
+    app.add_handler(CallbackQueryHandler(price_class_callback, pattern="^price_(class_|cancel)"))
 
     # Меню пользователя
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         user_id = update.effective_user.id
+
+        if context.user_data.get("price_stage"):
+            stage = context.user_data.get("price_stage")
+            price_query = context.user_data.setdefault("price_query", {})
+            normalized = text.strip().lower()
+            if normalized in {"отмена", "назад ◀️"}:
+                reset_price_flow(context)
+                await update.message.reply_text(
+                    "Возврат в главное меню",
+                    reply_markup=main_menu_keyboard(user_id),
+                )
+                return
+
+            if stage == WAIT_PRICE_CITY:
+                if not text.strip():
+                    await update.message.reply_text("Введите название города:")
+                    return
+                price_query["city"] = text.strip()
+                context.user_data["price_stage"] = WAIT_PRICE_POINT_A
+                await update.message.reply_text("Введите точку А (откуда поедем):")
+                return
+            if stage == WAIT_PRICE_POINT_A:
+                if not text.strip():
+                    await update.message.reply_text("Введите адрес отправления:")
+                    return
+                price_query["address_from"] = text.strip()
+                context.user_data["price_stage"] = WAIT_PRICE_POINT_B
+                await update.message.reply_text("Введите точку Б (куда едем):")
+                return
+            if stage == WAIT_PRICE_POINT_B:
+                if not text.strip():
+                    await update.message.reply_text("Введите адрес назначения:")
+                    return
+                price_query["address_to"] = text.strip()
+                context.user_data["price_stage"] = WAIT_PRICE_CLASS
+                await update.message.reply_text(
+                    "Выберите класс автомобиля:",
+                    reply_markup=price_class_keyboard(),
+                )
+                return
+            if stage == WAIT_PRICE_CLASS:
+                await update.message.reply_text(
+                    "Выберите класс автомобиля с помощью кнопок:",
+                    reply_markup=price_class_keyboard(),
+                )
+                return
 
         if context.user_data.get("awaiting_city"):
             city = text.strip()
@@ -1410,6 +1999,8 @@ def main():
             await profile(update, context)
         elif text == "Помощь ❓":
             await help_menu(update, context)
+        elif text == "Узнать цену 💰":
+            await price_menu(update, context)
         elif text == "Заказать такси 🚖":
             await order_menu(update, context)
         elif text == "Назад ◀️":
