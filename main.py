@@ -28,9 +28,12 @@ DB_PATH = os.path.join(DB_DIR, "DB.db")
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
 
 logging.basicConfig(
-    filename="bot.log",
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger(__name__)
 
