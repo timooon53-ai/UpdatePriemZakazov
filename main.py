@@ -408,33 +408,35 @@ def tariff_keyboard():
     ])
 
 
-def child_seat_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👶 Кресло", callback_data="seat_need")],
-        [InlineKeyboardButton("📝 Пожелания", callback_data="seat_wish")],
-        [InlineKeyboardButton("⏭️ Пропустить", callback_data="seat_skip")],
-    ])
-
-
 def child_seat_type_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🛄 Свое", callback_data="seat_type_Свое")],
         [InlineKeyboardButton("👶 9м - 4л", callback_data="seat_type_9м-4л")],
         [InlineKeyboardButton("🧒 3-7л", callback_data="seat_type_3-7л")],
         [InlineKeyboardButton("👦 6-12л", callback_data="seat_type_6-12л")],
-        [InlineKeyboardButton("🚪 Выйти", callback_data="seat_type_exit")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="seat_type_exit")],
     ])
 
 
-def wishes_keyboard(selected=None):
-    selected = selected or []
-    def label(option, text):
-        return f"{'✅' if option in selected else '⬜️'} {text}"
+def additional_options_keyboard(order_data):
+    selected_wishes = set(order_data.get("wishes", []))
+    child_seat = order_data.get("child_seat")
+    child_seat_type = order_data.get("child_seat_type")
+
+    def mark(text, active):
+        return f"{'✅' if active else '⬜️'} {text}"
+
+    child_selected = child_seat is not None and child_seat != "Не требуется"
+    child_label = "Детское кресло"
+    if child_selected:
+        detail = child_seat_type or child_seat
+        child_label = f"{child_label} ({detail})"
 
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(label("animals", "Перевозка животных 🐾"), callback_data="wish_animals")],
-        [InlineKeyboardButton(label("wheelchair", "Буду с инвалидным креслом ♿"), callback_data="wish_wheelchair")],
-        [InlineKeyboardButton("✅ Готово", callback_data="wish_done"), InlineKeyboardButton("⏭️ Пропустить", callback_data="wish_skip")],
+        [InlineKeyboardButton(mark(child_label, child_selected), callback_data="additional_child")],
+        [InlineKeyboardButton(mark("Перевозка животных 🐾", "Перевозка животных" in selected_wishes), callback_data="additional_animals")],
+        [InlineKeyboardButton(mark("Буду с инвалидным креслом ♿", "Буду с инвалидным креслом" in selected_wishes), callback_data="additional_wheelchair")],
+        [InlineKeyboardButton("✅ Готово", callback_data="additional_done"), InlineKeyboardButton("⏭️ Пропустить", callback_data="additional_skip")],
     ])
 
 def admin_order_buttons(order_id):
@@ -522,6 +524,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Привет, @{user.username or 'не указан'}! Добро пожаловать в сервис заказа такси 🚖",
         reply_markup=main_menu_keyboard(user.id)
     )
+
+
+async def start_over(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сбросить любой сценарий и показать стартовое меню."""
+    context.user_data.clear()
+    return await start(update, context) or ConversationHandler.END
 
 async def send_profile_info(target, user_id, context):
     user = get_user(user_id)
@@ -633,9 +641,8 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WAIT_ADDRESS_THIRD_DECISION,
     WAIT_ADDRESS_THIRD,
     WAIT_TARIFF,
-    WAIT_CHILD_SEAT,
+    WAIT_ADDITIONAL,
     WAIT_CHILD_SEAT_TYPE,
-    WAIT_WISHES,
     WAIT_COMMENT,
     WAIT_ADMIN_MESSAGE,
     WAIT_ADMIN_SUM,
@@ -643,7 +650,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WAIT_ADMIN_BALANCE_UPDATE,
     WAIT_ADMIN_ORDERS,
     WAIT_ADMIN_BROADCAST,
-) = range(17)
+) = range(16)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -894,24 +901,11 @@ async def tariff_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     tariff = query.data.split("_", 1)[1]
     context.user_data.setdefault('order_data', {})['tariff'] = tariff
-    await query.message.reply_text("Нужен ли детский кресло?", reply_markup=child_seat_keyboard())
-    return WAIT_CHILD_SEAT
-
-
-async def child_seat_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    choice = query.data
-    if choice == "seat_need":
-        context.user_data.setdefault('order_data', {})['child_seat'] = "Нужно"
-        await query.message.reply_text("Выберите тип кресла", reply_markup=child_seat_type_keyboard())
-        return WAIT_CHILD_SEAT_TYPE
-    elif choice == "seat_wish":
-        context.user_data.setdefault('order_data', {})['child_seat'] = "Пожелания"
-    else:
-        context.user_data.setdefault('order_data', {})['child_seat'] = "Не требуется"
-    await query.message.reply_text("Выберите пожелания", reply_markup=wishes_keyboard(context.user_data.get('order_data', {}).get('wishes')))
-    return WAIT_WISHES
+    await query.message.reply_text(
+        "Выберите доп. опции по необходимости",
+        reply_markup=additional_options_keyboard(context.user_data.get('order_data', {})),
+    )
+    return WAIT_ADDITIONAL
 
 
 async def child_seat_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -919,35 +913,54 @@ async def child_seat_type_selected(update: Update, context: ContextTypes.DEFAULT
     await query.answer()
     data = query.data
     if data == "seat_type_exit":
-        await query.message.reply_text("Выберите пожелания", reply_markup=wishes_keyboard(context.user_data.get('order_data', {}).get('wishes')))
-        return WAIT_WISHES
+        await query.edit_message_text(
+            "Выберите доп. опции по необходимости",
+            reply_markup=additional_options_keyboard(context.user_data.get('order_data', {})),
+        )
+        return WAIT_ADDITIONAL
 
     seat_type = data.split("_", 2)[2]
-    context.user_data.setdefault('order_data', {})['child_seat_type'] = seat_type
-    await query.message.reply_text("Выберите пожелания", reply_markup=wishes_keyboard(context.user_data.get('order_data', {}).get('wishes')))
-    return WAIT_WISHES
+    order_data = context.user_data.setdefault('order_data', {})
+    order_data['child_seat'] = "Нужно"
+    order_data['child_seat_type'] = seat_type
+    await query.edit_message_text(
+        "Выберите доп. опции по необходимости",
+        reply_markup=additional_options_keyboard(order_data),
+    )
+    return WAIT_ADDITIONAL
 
-
-async def wishes_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def additional_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     order_data = context.user_data.setdefault('order_data', {})
     current_wishes = set(order_data.get('wishes', []))
 
-    if data == "wish_done" or data == "wish_skip":
-        await query.message.reply_text("Добавьте комментарий для админа или нажмите «Пропустить ➡️»", reply_markup=skip_keyboard())
+    if data == "additional_child":
+        await query.edit_message_text(
+            "Выберите тип детского кресла",
+            reply_markup=child_seat_type_keyboard(),
+        )
+        return WAIT_CHILD_SEAT_TYPE
+
+    if data in {"additional_animals", "additional_wheelchair"}:
+        label = "Перевозка животных" if data == "additional_animals" else "Буду с инвалидным креслом"
+        if label in current_wishes:
+            current_wishes.remove(label)
+        else:
+            current_wishes.add(label)
+        order_data['wishes'] = list(current_wishes)
+        await query.edit_message_reply_markup(reply_markup=additional_options_keyboard(order_data))
+        return WAIT_ADDITIONAL
+
+    if data in {"additional_done", "additional_skip"}:
+        await query.message.reply_text(
+            "Добавьте комментарий для админа или нажмите «Пропустить ➡️»",
+            reply_markup=skip_keyboard(),
+        )
         return WAIT_COMMENT
 
-    option = "animals" if data == "wish_animals" else "wheelchair"
-    label = "Перевозка животных" if option == "animals" else "Буду с инвалидным креслом"
-    if label in current_wishes:
-        current_wishes.remove(label)
-    else:
-        current_wishes.add(label)
-    order_data['wishes'] = list(current_wishes)
-    await query.edit_message_reply_markup(reply_markup=wishes_keyboard(order_data['wishes']))
-    return WAIT_WISHES
+    return WAIT_ADDITIONAL
 
 
 # ==========================
@@ -1336,12 +1349,11 @@ def main():
                 CallbackQueryHandler(favorite_address_callback, pattern="^fav_third_"),
             ],
             WAIT_TARIFF: [CallbackQueryHandler(tariff_selected, pattern="^tariff_")],
-            WAIT_CHILD_SEAT: [CallbackQueryHandler(child_seat_selected, pattern="^seat_")],
+            WAIT_ADDITIONAL: [CallbackQueryHandler(additional_selected, pattern="^additional_")],
             WAIT_CHILD_SEAT_TYPE: [CallbackQueryHandler(child_seat_type_selected, pattern="^seat_type_")],
-            WAIT_WISHES: [CallbackQueryHandler(wishes_selected, pattern="^wish_")],
             WAIT_COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_comment)],
         },
-        fallbacks=[],
+        fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
         per_message=False,
     )
@@ -1356,7 +1368,7 @@ def main():
             WAIT_ADMIN_ORDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_orders_lookup)],
             WAIT_ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast)],
         },
-        fallbacks=[],
+        fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
         per_message=False,
     )
