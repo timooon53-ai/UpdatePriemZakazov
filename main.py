@@ -408,21 +408,13 @@ def tariff_keyboard():
     ])
 
 
-def child_seat_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👶 Кресло", callback_data="seat_need")],
-        [InlineKeyboardButton("📝 Пожелания", callback_data="seat_wish")],
-        [InlineKeyboardButton("⏭️ Пропустить", callback_data="seat_skip")],
-    ])
-
-
 def child_seat_type_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🛄 Свое", callback_data="seat_type_Свое")],
         [InlineKeyboardButton("👶 9м - 4л", callback_data="seat_type_9м-4л")],
         [InlineKeyboardButton("🧒 3-7л", callback_data="seat_type_3-7л")],
         [InlineKeyboardButton("👦 6-12л", callback_data="seat_type_6-12л")],
-        [InlineKeyboardButton("🚪 Выйти", callback_data="seat_type_exit")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="seat_type_exit")],
     ])
 
 
@@ -650,7 +642,6 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WAIT_ADDRESS_THIRD,
     WAIT_TARIFF,
     WAIT_ADDITIONAL,
-    WAIT_CHILD_SEAT,
     WAIT_CHILD_SEAT_TYPE,
     WAIT_COMMENT,
     WAIT_ADMIN_MESSAGE,
@@ -659,7 +650,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WAIT_ADMIN_BALANCE_UPDATE,
     WAIT_ADMIN_ORDERS,
     WAIT_ADMIN_BROADCAST,
-) = range(17)
+) = range(16)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -917,41 +908,24 @@ async def tariff_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAIT_ADDITIONAL
 
 
-async def child_seat_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    choice = query.data
-    if choice == "seat_need":
-        context.user_data.setdefault('order_data', {})['child_seat'] = "Нужно"
-        await query.message.reply_text("Выберите тип кресла", reply_markup=child_seat_type_keyboard())
-        return WAIT_CHILD_SEAT_TYPE
-    elif choice == "seat_wish":
-        context.user_data.setdefault('order_data', {})['child_seat'] = "Пожелания"
-    else:
-        context.user_data.setdefault('order_data', {})['child_seat'] = "Не требуется"
-    await query.message.reply_text(
-        "Дополнительные опции",
-        reply_markup=additional_options_keyboard(context.user_data.get('order_data', {})),
-    )
-    return WAIT_ADDITIONAL
-
-
 async def child_seat_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     if data == "seat_type_exit":
-        await query.message.reply_text(
-            "Дополнительные опции",
+        await query.edit_message_text(
+            "Выберите доп. опции по необходимости",
             reply_markup=additional_options_keyboard(context.user_data.get('order_data', {})),
         )
         return WAIT_ADDITIONAL
 
     seat_type = data.split("_", 2)[2]
-    context.user_data.setdefault('order_data', {})['child_seat_type'] = seat_type
-    await query.message.reply_text(
-        "Дополнительные опции",
-        reply_markup=additional_options_keyboard(context.user_data.get('order_data', {})),
+    order_data = context.user_data.setdefault('order_data', {})
+    order_data['child_seat'] = "Нужно"
+    order_data['child_seat_type'] = seat_type
+    await query.edit_message_text(
+        "Выберите доп. опции по необходимости",
+        reply_markup=additional_options_keyboard(order_data),
     )
     return WAIT_ADDITIONAL
 
@@ -963,8 +937,11 @@ async def additional_selected(update: Update, context: ContextTypes.DEFAULT_TYPE
     current_wishes = set(order_data.get('wishes', []))
 
     if data == "additional_child":
-        await query.message.reply_text("Нужен ли детский кресло?", reply_markup=child_seat_keyboard())
-        return WAIT_CHILD_SEAT
+        await query.edit_message_text(
+            "Выберите тип детского кресла",
+            reply_markup=child_seat_type_keyboard(),
+        )
+        return WAIT_CHILD_SEAT_TYPE
 
     if data in {"additional_animals", "additional_wheelchair"}:
         label = "Перевозка животных" if data == "additional_animals" else "Буду с инвалидным креслом"
@@ -1373,7 +1350,6 @@ def main():
             ],
             WAIT_TARIFF: [CallbackQueryHandler(tariff_selected, pattern="^tariff_")],
             WAIT_ADDITIONAL: [CallbackQueryHandler(additional_selected, pattern="^additional_")],
-            WAIT_CHILD_SEAT: [CallbackQueryHandler(child_seat_selected, pattern="^seat_")],
             WAIT_CHILD_SEAT_TYPE: [CallbackQueryHandler(child_seat_type_selected, pattern="^seat_type_")],
             WAIT_COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_comment)],
         },
