@@ -22,6 +22,7 @@ TOKEN = TOKEN
 ADMIN_IDS = ADMIN_IDS
 SCREENSHOTS_DIR = SCREENSHOTS_DIR
 DB_DIR = DB_DIR
+DEFAULT_TOKEN2 = (os.getenv("DEFAULT_TOKEN2") or "").strip()
 
 DB_PATH = os.path.join(DB_DIR, "DB.db")
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
@@ -151,6 +152,33 @@ def init_db():
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('ordering_enabled', '1')"
         )
 
+        conn.commit()
+
+
+def ensure_default_order_info():
+    if not DEFAULT_TOKEN2:
+        return
+
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT id FROM orders_info
+            WHERE is_active=1 AND token2=?
+            LIMIT 1
+            """,
+            (DEFAULT_TOKEN2,),
+        )
+        if c.fetchone():
+            return
+
+        c.execute(
+            """
+            INSERT INTO orders_info (order_id, tg_id, order_number, token2, card_x, external_id, link, is_active)
+            VALUES (NULL, NULL, 'AUTO', ?, NULL, NULL, NULL, 1)
+            """,
+            (DEFAULT_TOKEN2,),
+        )
         conn.commit()
 
 
@@ -530,7 +558,27 @@ def get_active_token2():
             """
         )
         row = c.fetchone()
-        return row[0] if row else None
+        if row and row[0]:
+            return row[0]
+    return DEFAULT_TOKEN2 or None
+
+
+def set_active_token2(token2: str, tg_id=None):
+    token2 = (token2 or "").strip()
+    if not token2:
+        return
+
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE orders_info SET is_active=0 WHERE is_active=1")
+        c.execute(
+            """
+            INSERT INTO orders_info (order_id, tg_id, order_number, token2, is_active)
+            VALUES (NULL, ?, 'USER', ?, 1)
+            """,
+            (tg_id, token2),
+        )
+        conn.commit()
 
 
 def price_headers(token2):
@@ -934,6 +982,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================
 (
     WAIT_SCREENSHOT,
+    WAIT_TOKEN2,
     WAIT_CITY,
     WAIT_ADDRESS_FROM,
     WAIT_ADDRESS_TO,
@@ -954,7 +1003,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WAIT_PRICE_POINT_A,
     WAIT_PRICE_POINT_B,
     WAIT_PRICE_CLASS,
-) = range(21)
+) = range(22)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -982,8 +1031,9 @@ def start_price_flow(context: ContextTypes.DEFAULT_TYPE):
 
 async def price_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start_price_flow(context)
+    context.user_data["awaiting_token2_for"] = "price"
     await update.message.reply_text(
-        "Укажите город, в котором заказываете такси (или отправьте \"Отмена\" для выхода):"
+        "Перед расчётом цены отправьте актуальный token2 (можно новый, чтобы обновить):"
     )
 
 async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1003,13 +1053,12 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return WAIT_SCREENSHOT
     elif data == "order_text":
         context.user_data['order_type'] = "text"
-        saved_user = get_user(query.from_user.id)
-        if saved_user and saved_user.get("city"):
-            context.user_data.setdefault('order_data', {})['city'] = saved_user.get("city")
-            await ask_address_from(query, context)
-            return WAIT_ADDRESS_FROM
-        await query.message.reply_text("Введите город 🏙️")
-        return WAIT_CITY
+        context.user_data['awaiting_token2_for'] = "order"
+        await query.message.reply_text(
+            "Введите token2 (или отправьте новый, чтобы обновить):",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="order_back")]]),
+        )
+        return WAIT_TOKEN2
     elif data == "order_back":
         await query.message.reply_text(
             "Возврат в главное меню",
@@ -1018,6 +1067,35 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
 
 # ---- Просмотр цены ----
+async def token2_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    token = (update.message.text or "").strip()
+    if not token:
+        await update.message.reply_text("Введите корректный token2:")
+        return WAIT_TOKEN2
+
+    set_active_token2(token, update.effective_user.id)
+    next_step = context.user_data.pop("awaiting_token2_for", None)
+
+    if next_step == "order":
+        saved_user = get_user(update.effective_user.id)
+        if saved_user and saved_user.get("city"):
+            context.user_data.setdefault('order_data', {})['city'] = saved_user.get("city")
+            await ask_address_from(update, context)
+            return WAIT_ADDRESS_FROM
+        await update.message.reply_text("Введите город 🏙️")
+        return WAIT_CITY
+
+    if next_step == "price":
+        context.user_data["price_stage"] = WAIT_PRICE_CITY
+        await update.message.reply_text(
+            "Укажите город, в котором заказываете такси (или отправьте \"Отмена\" для выхода):"
+        )
+        return ConversationHandler.END
+
+    await update.message.reply_text("token2 обновлён.")
+    return ConversationHandler.END
+
+
 async def price_class_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1852,6 +1930,7 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================
 def main():
     init_db()
+    ensure_default_order_info()
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -1862,6 +1941,7 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(order_type_callback, pattern="^order_")],
         states={
+            WAIT_TOKEN2: [MessageHandler(filters.TEXT & ~filters.COMMAND, token2_input)],
             WAIT_SCREENSHOT: [MessageHandler(filters.PHOTO, screenshot_receive)],
             WAIT_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_city)],
             WAIT_ADDRESS_FROM: [
@@ -1914,6 +1994,12 @@ def main():
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         user_id = update.effective_user.id
+
+        if context.user_data.get("awaiting_token2_for"):
+            result = await token2_input(update, context)
+            if result in {WAIT_CITY, WAIT_ADDRESS_FROM, WAIT_TOKEN2}:
+                return result
+            return
 
         if context.user_data.get("price_stage"):
             stage = context.user_data.get("price_stage")
