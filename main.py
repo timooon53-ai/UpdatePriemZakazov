@@ -3,6 +3,10 @@ import os
 import sqlite3
 import logging
 import requests
+import re
+import time
+import uuid
+import json
 from datetime import datetime
 from functools import wraps
 
@@ -26,9 +30,16 @@ USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
 logging.basicConfig(
     filename="bot.log",
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Одновременное логирование в файл и консоль
+if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(console_handler)
 
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(DB_DIR, exist_ok=True)
@@ -148,6 +159,24 @@ def init_db():
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('ordering_enabled', '1')"
         )
 
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS price_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_id INTEGER,
+                stage TEXT,
+                method TEXT,
+                url TEXT,
+                request_headers TEXT,
+                request_body TEXT,
+                response_status INTEGER,
+                response_headers TEXT,
+                response_body TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
         conn.commit()
 
 
@@ -171,6 +200,90 @@ def set_setting(key, value):
 
 def is_ordering_enabled():
     return get_setting("ordering_enabled", "1") == "1"
+
+
+def truncate_text(text: str, limit: int = 2000) -> str:
+    if text is None:
+        return ""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def to_json_string(data) -> str:
+    try:
+        return json.dumps(data, ensure_ascii=False, indent=2)
+    except Exception:
+        return str(data)
+
+
+def save_price_log(
+    tg_id,
+    stage,
+    method,
+    url,
+    request_headers,
+    request_body,
+    response_status,
+    response_headers,
+    response_body,
+):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO price_logs (
+                tg_id, stage, method, url, request_headers, request_body,
+                response_status, response_headers, response_body
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                tg_id,
+                stage,
+                method,
+                url,
+                request_headers,
+                request_body,
+                response_status,
+                response_headers,
+                response_body,
+            ),
+        )
+        conn.commit()
+
+
+def format_price_log(stage, url, req_headers, req_body, resp_status, resp_headers, resp_body):
+    return "\n".join(
+        [
+            f"[{stage}] POST {url}",
+            "--- Request headers ---",
+            truncate_text(req_headers, 1200),
+            "--- Request body ---",
+            truncate_text(req_body, 1200),
+            f"--- Response status: {resp_status} ---",
+            truncate_text(resp_headers, 1000),
+            "--- Response body ---",
+            truncate_text(resp_body, 1800),
+        ]
+    )
+
+
+def chunk_text(text: str, limit: int = 3500):
+    for i in range(0, len(text), limit):
+        yield text[i : i + limit]
+
+
+async def send_price_logs(user_id, bot, log_messages):
+    if not log_messages:
+        return
+    combined = "\n\n".join(log_messages)
+    for chunk in chunk_text(combined):
+        await bot.send_message(chat_id=user_id, text=chunk)
+
+
+async def delete_message_safe(message):
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 # ==========================
 # Работа с пользователями
@@ -261,6 +374,18 @@ def get_user_orders(tg_id, limit=5):
             (tg_id, limit),
         )
         return c.fetchall()
+
+
+def get_latest_user_order(tg_id):
+    with sqlite3.connect(ORDERS_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute(
+            "SELECT * FROM orders WHERE tg_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (tg_id,),
+        )
+        row = c.fetchone()
+        return dict(row) if row else None
 
 # ==========================
 # Работа с заказами
@@ -419,6 +544,7 @@ def main_menu_keyboard(user_id=None):
     buttons = [
         [KeyboardButton("Профиль 👤")],
         [KeyboardButton("Заказать такси 🚖")],
+        [KeyboardButton("Узнать цену 💰")],
         [KeyboardButton("Помощь ❓")],
     ]
     if user_id in ADMIN_IDS:
@@ -468,6 +594,266 @@ def order_type_keyboard():
         [InlineKeyboardButton("Отправить текстом 📝", callback_data="order_text")],
         [InlineKeyboardButton("Назад ◀️", callback_data="order_back")]
     ])
+
+
+def price_class_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Эконом 💸", callback_data="price_class_econom"),
+            InlineKeyboardButton("Комфорт 😊", callback_data="price_class_business"),
+        ],
+        [
+            InlineKeyboardButton("Комфорт+ ✨", callback_data="price_class_comfortplus"),
+            InlineKeyboardButton("Бизнес 💼", callback_data="price_class_vip"),
+        ],
+        [
+            InlineKeyboardButton("Премьер 👑", callback_data="price_class_premier"),
+            InlineKeyboardButton("Элит 🏆", callback_data="price_class_maybach"),
+        ],
+        [InlineKeyboardButton("Отменить", callback_data="price_cancel")],
+    ])
+
+
+PRICE_CLASS_LABELS = {
+    "econom": "Эконом",
+    "business": "Комфорт",
+    "comfortplus": "Комфорт+",
+    "vip": "Бизнес",
+    "premier": "Премьер",
+    "maybach": "Элит",
+}
+
+
+def generate_reqid():
+    return f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:16]}"
+
+
+def get_active_token2():
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT token2 FROM orders_info
+            WHERE token2 IS NOT NULL AND token2 != '' AND is_active=1
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """
+        )
+        row = c.fetchone()
+        return row[0] if row else None
+
+
+def price_headers(token2):
+    return {
+        "User-Agent": "ru.yandex.ytaxi/700.116.0.501961 (iPhone; iPhone13,2; iOS 18.6; Darwin)",
+        "Accept": "*/*",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token2}",
+        "x-oauth-token": token2,
+    }
+
+
+def suggest_payload(part, point_type, class_code):
+    return {
+        "type": point_type,
+        "part": part,
+        "client_reqid": generate_reqid(),
+        "session_info": {},
+        "action": "user_input",
+        "state": {
+            "selected_class": class_code,
+            "coord_providers": [],
+            "location_available": False,
+            "precise_location_available": False,
+            "wifi_networks": [],
+            "fields": [],
+        },
+    }
+
+
+def extract_point(suggest_data):
+    suggestions = suggest_data.get("suggestions") or suggest_data.get("items") or []
+    if not suggestions:
+        return None, None
+    first = suggestions[0]
+    title = (
+        (first.get("title") or {}).get("text")
+        or first.get("value")
+        or (first.get("subtitle") or {}).get("text")
+    )
+    point = first.get("point") or first.get("position")
+    if isinstance(point, dict):
+        point = [point.get("lon"), point.get("lat")]
+    return title, point
+
+
+def perform_logged_post(url, payload, headers, stage, tg_id=None, log_buffer=None, timeout=6):
+    req_headers = to_json_string(headers)
+    req_body = to_json_string(payload)
+
+    def log_to_console(prefix, status=None, resp_headers=None, resp_body=None):
+        parts = [f"[{stage}] {prefix} {url}"]
+        parts.append(f"Headers: {truncate_text(req_headers, 1200)}")
+        parts.append(f"Body: {truncate_text(req_body, 1200)}")
+        if status is not None:
+            parts.append(f"Status: {status}")
+        if resp_headers is not None:
+            parts.append(f"Resp headers: {truncate_text(resp_headers, 1000)}")
+        if resp_body is not None:
+            parts.append(f"Resp body: {truncate_text(resp_body, 1800)}")
+        logger.info(" | ".join(parts))
+
+    log_to_console("POST")
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=timeout,
+        )
+        resp_status = response.status_code
+        resp_headers = to_json_string(dict(response.headers))
+        resp_body = response.text
+        log_to_console("RESPONSE", status=resp_status, resp_headers=resp_headers, resp_body=resp_body)
+        save_price_log(
+            tg_id,
+            stage,
+            "POST",
+            url,
+            req_headers,
+            req_body,
+            resp_status,
+            resp_headers,
+            resp_body,
+        )
+        if log_buffer is not None:
+            log_buffer.append(
+                format_price_log(stage, url, req_headers, req_body, resp_status, resp_headers, resp_body)
+            )
+        response.raise_for_status()
+        return response
+    except requests.RequestException as exc:
+        response = getattr(exc, "response", None)
+        resp_status = response.status_code if response else None
+        resp_headers = to_json_string(dict(response.headers)) if response else ""
+        resp_body = response.text if response else str(exc)
+        log_to_console("ERROR", status=resp_status, resp_headers=resp_headers, resp_body=resp_body)
+        save_price_log(
+            tg_id,
+            stage,
+            "POST",
+            url,
+            req_headers,
+            req_body,
+            resp_status,
+            resp_headers,
+            resp_body,
+        )
+        if log_buffer is not None:
+            log_buffer.append(
+                format_price_log(stage, url, req_headers, req_body, resp_status, resp_headers, resp_body)
+            )
+        raise
+
+
+def request_suggest(address, point_type, class_code, token2, tg_id=None, log_buffer=None):
+    url = (
+        "https://tc.mobile.yandex.net/4.0/persuggest/v1/suggest?"
+        "mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_V4_0"
+    )
+    response = perform_logged_post(
+        url,
+        suggest_payload(address, point_type, class_code),
+        price_headers(token2),
+        stage=f"suggest_{point_type}",
+        tg_id=tg_id,
+        log_buffer=log_buffer,
+    )
+    return extract_point(response.json())
+
+
+def extract_price_value(response):
+    match = re.search(r'"max_price_as_decimal":"([0-9.]+)"', response.text)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            pass
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+
+    summary = data.get("summary") or {}
+    price_block = summary.get("price") or {}
+    value = price_block.get("value") or price_block.get("amount")
+    if value is not None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    price_str = data.get("max_price_as_decimal")
+    if price_str:
+        try:
+            return float(price_str)
+        except ValueError:
+            return None
+    return None
+
+
+def request_route_price(city, address_from, address_to, class_code, tg_id=None, log_buffer=None):
+    token2 = get_active_token2()
+    if not token2:
+        message = "token2 отсутствует. Добавьте запись в orders_info."
+        logger.error(message)
+        if log_buffer is not None:
+            log_buffer.append(message)
+        raise ValueError(message)
+
+    title_a, point_a = request_suggest(address_from, "a", class_code, token2, tg_id=tg_id, log_buffer=log_buffer)
+    title_b, point_b = request_suggest(address_to, "b", class_code, token2, tg_id=tg_id, log_buffer=log_buffer)
+
+    if not point_a or not point_b:
+        raise ValueError("Не удалось получить координаты для одного из адресов")
+
+    payload = {
+        "selected_class": class_code,
+        "format_currency": True,
+        "with_title": True,
+        "route": [point_a, point_b],
+        "zone_name": (city or "").lower() or "moscow",
+        "state": {
+            "fields": [
+                {"type": "a", "title": title_a or address_from, "position": point_a},
+                {"type": "b", "title": title_b or address_to, "position": point_b},
+            ]
+        },
+        "payment": {"type": "cash"},
+    }
+
+    route_url = (
+        "https://tc.mobile.yandex.net/3.0/routestats?"
+        "mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_0"
+    )
+    response = perform_logged_post(
+        route_url,
+        payload,
+        price_headers(token2),
+        stage="route",
+        tg_id=tg_id,
+        log_buffer=log_buffer,
+    )
+
+    price_value = extract_price_value(response)
+    if price_value is None:
+        raise ValueError("Цена не найдена в ответе сервиса")
+
+    return {
+        "title_a": title_a or address_from,
+        "title_b": title_b or address_to,
+        "price": price_value,
+    }
 
 
 def yes_no_keyboard():
@@ -754,7 +1140,11 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WAIT_ADMIN_BALANCE_UPDATE,
     WAIT_ADMIN_ORDERS,
     WAIT_ADMIN_BROADCAST,
-) = range(16)
+    WAIT_PRICE_CITY,
+    WAIT_PRICE_POINT_A,
+    WAIT_PRICE_POINT_B,
+    WAIT_PRICE_CLASS,
+) = range(21)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -767,6 +1157,24 @@ async def order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     await update.message.reply_text("Выберите способ заказа:", reply_markup=order_type_keyboard())
+
+
+def reset_price_flow(context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("price_stage", None)
+    context.user_data.pop("price_query", None)
+
+
+def start_price_flow(context: ContextTypes.DEFAULT_TYPE):
+    reset_price_flow(context)
+    context.user_data["price_query"] = {}
+    context.user_data["price_stage"] = WAIT_PRICE_CITY
+
+
+async def price_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    start_price_flow(context)
+    await update.message.reply_text(
+        "Укажите город, в котором заказываете такси (или отправьте \"Отмена\" для выхода):"
+    )
 
 async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -798,6 +1206,89 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=main_menu_keyboard(query.from_user.id),
         )
         return ConversationHandler.END
+
+# ---- Просмотр цены ----
+async def price_class_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_id = query.from_user.id
+
+    await delete_message_safe(query.message)
+
+    if data == "price_cancel":
+        reset_price_flow(context)
+        await query.message.reply_text(
+            "Возврат в главное меню", reply_markup=main_menu_keyboard(user_id)
+        )
+        return ConversationHandler.END
+
+    if not data.startswith("price_class_"):
+        return ConversationHandler.END
+
+    if context.user_data.get("price_stage") != WAIT_PRICE_CLASS:
+        await query.message.reply_text(
+            "Пожалуйста, начните с пункта \"Узнать цену 💰\".",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return ConversationHandler.END
+
+    class_code = data.split("price_class_", 1)[1]
+    price_data = context.user_data.get("price_query", {})
+    city = price_data.get("city")
+    address_from = price_data.get("address_from")
+    address_to = price_data.get("address_to")
+
+    if not city or not address_from or not address_to:
+        reset_price_flow(context)
+        await query.message.reply_text(
+            "Не хватает данных для расчёта. Попробуйте снова.",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return ConversationHandler.END
+
+    log_messages = []
+    try:
+        result = request_route_price(
+            city,
+            address_from,
+            address_to,
+            class_code,
+            tg_id=user_id,
+            log_buffer=log_messages,
+        )
+    except Exception as e:
+        logger.error(f"Не удалось рассчитать цену: {e}")
+        if not log_messages:
+            log_messages.append(f"Ошибка: {e}")
+        await send_price_logs(user_id, context.bot, log_messages)
+        reset_price_flow(context)
+        await query.message.reply_text(
+            "Не удалось рассчитать цену. Попробуйте позже или проверьте введённые данные.",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return ConversationHandler.END
+
+    price_value = result.get("price")
+    half_price = round(price_value / 2, 2)
+    title_a = result.get("title_a", address_from)
+    title_b = result.get("title_b", address_to)
+
+    reset_price_flow(context)
+    await query.message.reply_text(
+        (
+            f"Город: {city}\n"
+            f"Откуда: {title_a}\n"
+            f"Куда: {title_b}\n"
+            f"Класс: {PRICE_CLASS_LABELS.get(class_code, class_code)}\n\n"
+            f"Цена в приложении: {price_value:.2f} ₽\n"
+            f"К оплате: {half_price:.2f} ₽"
+        ),
+        reply_markup=main_menu_keyboard(user_id),
+    )
+    if log_messages:
+        await send_price_logs(user_id, context.bot, log_messages)
+    return ConversationHandler.END
 
 # ---- Клавиатура "Пропустить" ----
 def skip_keyboard():
@@ -1622,11 +2113,58 @@ def main():
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|pay_balance_|replacement_|admin_replacements)"))
+    app.add_handler(CallbackQueryHandler(price_class_callback, pattern="^price_(class_|cancel)"))
 
     # Меню пользователя
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         user_id = update.effective_user.id
+
+        if context.user_data.get("price_stage"):
+            stage = context.user_data.get("price_stage")
+            price_query = context.user_data.setdefault("price_query", {})
+            normalized = text.strip().lower()
+            if normalized in {"отмена", "назад ◀️"}:
+                reset_price_flow(context)
+                await update.message.reply_text(
+                    "Возврат в главное меню",
+                    reply_markup=main_menu_keyboard(user_id),
+                )
+                return
+
+            if stage == WAIT_PRICE_CITY:
+                if not text.strip():
+                    await update.message.reply_text("Введите название города:")
+                    return
+                price_query["city"] = text.strip()
+                context.user_data["price_stage"] = WAIT_PRICE_POINT_A
+                await update.message.reply_text("Введите точку А (откуда поедем):")
+                return
+            if stage == WAIT_PRICE_POINT_A:
+                if not text.strip():
+                    await update.message.reply_text("Введите адрес отправления:")
+                    return
+                price_query["address_from"] = text.strip()
+                context.user_data["price_stage"] = WAIT_PRICE_POINT_B
+                await update.message.reply_text("Введите точку Б (куда едем):")
+                return
+            if stage == WAIT_PRICE_POINT_B:
+                if not text.strip():
+                    await update.message.reply_text("Введите адрес назначения:")
+                    return
+                price_query["address_to"] = text.strip()
+                context.user_data["price_stage"] = WAIT_PRICE_CLASS
+                await update.message.reply_text(
+                    "Выберите класс автомобиля:",
+                    reply_markup=price_class_keyboard(),
+                )
+                return
+            if stage == WAIT_PRICE_CLASS:
+                await update.message.reply_text(
+                    "Выберите класс автомобиля с помощью кнопок:",
+                    reply_markup=price_class_keyboard(),
+                )
+                return
 
         if context.user_data.get("awaiting_city"):
             city = text.strip()
@@ -1666,6 +2204,8 @@ def main():
             await profile(update, context)
         elif text == "Помощь ❓":
             await help_menu(update, context)
+        elif text == "Узнать цену 💰":
+            await price_menu(update, context)
         elif text == "Заказать такси 🚖":
             await order_menu(update, context)
         elif text == "Назад ◀️":
