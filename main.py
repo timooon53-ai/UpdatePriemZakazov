@@ -209,7 +209,14 @@ def is_ordering_enabled():
 def add_user(tg_id, username):
     with sqlite3.connect(USERS_DB) as conn:
         c = conn.cursor()
-        c.execute("INSERT OR IGNORE INTO users (tg_id, username) VALUES (?, ?)", (tg_id, username))
+        c.execute(
+            """
+            INSERT INTO users (tg_id, username)
+            VALUES (?, ?)
+            ON CONFLICT(tg_id) DO UPDATE SET username = COALESCE(excluded.username, users.username)
+            """,
+            (tg_id, username),
+        )
         conn.commit()
 
 def get_user(tg_id):
@@ -1142,11 +1149,12 @@ async def notify_admins(context, order_id):
     type_ = order.get("type")
     user_info = get_user(tg_id)
     username = user_info.get("username") if user_info else None
+    username_label = f"@{username}" if username else "не указан"
 
     parts = [
         f"НОВЫЙ ЗАКАЗ №{order_id}",
         f"Тип: {type_}",
-        f"Пользователь: @{username} (ID: {tg_id})",
+        f"Пользователь: {username_label} (ID: {tg_id})",
     ]
     if order.get("city"):
         parts.append(f"Город: {order.get('city')}")
