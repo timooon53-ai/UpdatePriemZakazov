@@ -101,6 +101,35 @@ def init_db():
                 c.execute(f"ALTER TABLE orders ADD COLUMN {column} {definition}")
 
         c.execute("""
+            CREATE TABLE IF NOT EXISTS orders_info (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER,
+                tg_id INTEGER,
+                order_number TEXT,
+                token2 TEXT,
+                card_x TEXT,
+                external_id TEXT,
+                link TEXT,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        info_columns = {row[1] for row in c.execute("PRAGMA table_info(orders_info)").fetchall()}
+        needed_info_columns = {
+            "order_number": "TEXT",
+            "token2": "TEXT",
+            "card_x": "TEXT",
+            "external_id": "TEXT",
+            "link": "TEXT",
+            "is_active": "INTEGER DEFAULT 1",
+            "tg_id": "INTEGER",
+        }
+        for column, definition in needed_info_columns.items():
+            if column not in info_columns:
+                c.execute(f"ALTER TABLE orders_info ADD COLUMN {column} {definition}")
+
+        c.execute("""
             CREATE TABLE IF NOT EXISTS favorite_addresses (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tg_id INTEGER,
@@ -320,6 +349,56 @@ def update_order_fields(order_id, **fields):
         )
         conn.commit()
 
+
+def create_order_info(order_id):
+    order = get_order(order_id)
+    tg_id = order.get("tg_id") if order else None
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO orders_info (order_id, tg_id, is_active) VALUES (?, ?, 1)",
+            (order_id, tg_id),
+        )
+        conn.commit()
+        return c.lastrowid
+
+
+def get_order_info(info_id):
+    with sqlite3.connect(ORDERS_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM orders_info WHERE id=?", (info_id,))
+        row = c.fetchone()
+        return dict(row) if row else None
+
+
+def list_active_order_infos():
+    with sqlite3.connect(ORDERS_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute(
+            "SELECT * FROM orders_info WHERE is_active=1 ORDER BY created_at DESC, id DESC",
+        )
+        return [dict(row) for row in c.fetchall()]
+
+
+def update_order_info_field(info_id, **fields):
+    if not fields:
+        return
+    placeholders = ", ".join([f"{key}=?" for key in fields.keys()])
+    values = list(fields.values()) + [info_id]
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(f"UPDATE orders_info SET {placeholders} WHERE id=?", values)
+        conn.commit()
+
+
+def deactivate_order_info(info_id):
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE orders_info SET is_active=0 WHERE id=?", (info_id,))
+        conn.commit()
+
 # ==========================
 # Декоратор проверки админа
 # ==========================
@@ -439,6 +518,29 @@ def additional_options_keyboard(order_data):
         [InlineKeyboardButton("✅ Готово", callback_data="additional_done"), InlineKeyboardButton("⏭️ Пропустить", callback_data="additional_skip")],
     ])
 
+
+def replacement_fields_keyboard(info):
+    def mark(value, label):
+        return f"{'✅' if value else '➕'} {label}"
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(mark(info.get("order_number"), "OrderID"), callback_data=f"replacement_field_orderid_{info['id']}")],
+        [InlineKeyboardButton(mark(info.get("token2"), "token2"), callback_data=f"replacement_field_token2_{info['id']}")],
+        [InlineKeyboardButton(mark(info.get("card_x"), "card-x"), callback_data=f"replacement_field_cardx_{info['id']}")],
+        [InlineKeyboardButton(mark(info.get("external_id"), "ID"), callback_data=f"replacement_field_extid_{info['id']}")],
+        [InlineKeyboardButton(mark(info.get("link"), "Ссылка"), callback_data=f"replacement_field_link_{info['id']}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="replacement_back")],
+    ])
+
+
+def replacement_list_keyboard(infos):
+    buttons = []
+    for info in infos:
+        label = f"{info.get('created_at', '')}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"replacement_view_{info['id']}")])
+    buttons.append([InlineKeyboardButton("⬅️ В админку", callback_data="replacement_back")])
+    return InlineKeyboardMarkup(buttons)
+
 def admin_order_buttons(order_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Взял в работу ✅", callback_data=f"take_{order_id}"),
@@ -474,6 +576,7 @@ def admin_panel_keyboard():
         [InlineKeyboardButton("💳 Баланс пользователя", callback_data="admin_balance")],
         [InlineKeyboardButton("📦 Заказы пользователя", callback_data="admin_orders")],
         [InlineKeyboardButton("📢 Рассылка по всем", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("🔄 Заказы для подмены", callback_data="admin_replacements")],
         [InlineKeyboardButton(ordering_label, callback_data="admin_toggle")],
         [InlineKeyboardButton(status_text, callback_data="admin_status")],
     ])
@@ -644,6 +747,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WAIT_ADDITIONAL,
     WAIT_CHILD_SEAT_TYPE,
     WAIT_COMMENT,
+    WAIT_REPLACEMENT_FIELD,
     WAIT_ADMIN_MESSAGE,
     WAIT_ADMIN_SUM,
     WAIT_ADMIN_BALANCE,
@@ -1014,6 +1118,44 @@ async def notify_admins(context, order_id):
             logger.error(f"Ошибка уведомления админа {admin_id}: {e}")
 
 
+def replacement_info_text(info):
+    user = get_user(info.get("tg_id")) if info.get("tg_id") else None
+    username = user.get("username") if user else None
+    parts = [
+        f"🧩 Заказ для подмены #{info['id']}",
+        f"Создан: {info.get('created_at') or '—'}",
+        f"Заказчик: @{username or 'не указан'} (ID: {info.get('tg_id') or '—'})",
+        f"OrderID: {info.get('order_number') or '—'}",
+        f"token2: {info.get('token2') or '—'}",
+        f"card-x: {info.get('card_x') or '—'}",
+        f"ID: {info.get('external_id') or '—'}",
+        f"Ссылка: {info.get('link') or '—'}",
+        f"Связан с заказом №{info.get('order_id') or '—'}",
+    ]
+    return "\n".join(parts)
+
+
+async def notify_replacement_done(info, context):
+    tg_id = info.get("tg_id")
+    if not tg_id:
+        return
+    text = (
+        "✨ Поездка успешно завершена!\n\n"
+        "Спасибо, что выбрали нас.\n"
+        "📢 Канал: @FreeEatTaxi\n"
+        "🧑‍💼 Админ: @MikeWazovsk1y\n\n"
+        "Нажмите /start, чтобы вернуться в главное меню.\n"
+        "Поделитесь, пожалуйста, отзывом в чате — нам важно ваше мнение! 💬"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Оставить отзыв", url="https://t.me/+kE869Hcdm_w1OWVh")]
+    ])
+    try:
+        await context.bot.send_message(tg_id, text, reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Не удалось уведомить пользователя {tg_id} о завершении: {e}")
+
+
 # ==========================
 # CallbackQuery обработка (админ)
 # ==========================
@@ -1115,6 +1257,68 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         update_balance(tg_id, total)
         await context.bot.send_message(tg_id, f"💰 На ваш баланс начислено {total:.2f} ₽ за заказ №{order_id}")
         await query.message.reply_text("Баланс пользователя пополнен ✅")
+    elif data.startswith("replacement_offer_add_"):
+        order_id = int(data.rsplit("_", 1)[1])
+        info_id = create_order_info(order_id)
+        info = get_order_info(info_id)
+        await query.message.reply_text(
+            "Заполните данные заказа для подмены:",
+            reply_markup=replacement_fields_keyboard(info),
+        )
+    elif data.startswith("replacement_offer_skip_"):
+        await query.message.reply_text("Добавление заказа для подмены пропущено.")
+    elif data == "admin_replacements":
+        infos = list_active_order_infos()
+        if not infos:
+            await query.message.reply_text(
+                "Список заказов для подмены пуст", reply_markup=admin_panel_keyboard()
+            )
+            return ConversationHandler.END
+        await query.message.reply_text(
+            "Активные заказы для подмены:", reply_markup=replacement_list_keyboard(infos)
+        )
+    elif data.startswith("replacement_view_"):
+        info_id = int(data.rsplit("_", 1)[1])
+        info = get_order_info(info_id)
+        if not info:
+            await query.answer("Запись не найдена", show_alert=True)
+            return ConversationHandler.END
+        await query.message.reply_text(
+            replacement_info_text(info),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Назад", callback_data="replacement_back")],
+                [InlineKeyboardButton("Завершить заказ ✅", callback_data=f"replacement_finish_{info_id}")],
+            ]),
+        )
+    elif data.startswith("replacement_field_"):
+        parts = data.split("_")
+        field_key = parts[2]
+        info_id = int(parts[3])
+        context.user_data['replacement_field'] = field_key
+        context.user_data['replacement_info_id'] = info_id
+        prompts = {
+            "orderid": "Пришлите OrderID",
+            "token2": "Пришлите token2",
+            "cardx": "Пришлите card-x",
+            "extid": "Пришлите ID",
+            "link": "Пришлите ссылку",
+        }
+        await query.message.reply_text(prompts.get(field_key, "Пришлите значение"))
+        return WAIT_REPLACEMENT_FIELD
+    elif data == "replacement_back":
+        await admin_show_panel(query.message)
+        return ConversationHandler.END
+    elif data.startswith("replacement_finish_"):
+        info_id = int(data.rsplit("_", 1)[1])
+        info = get_order_info(info_id)
+        if not info:
+            await query.answer("Запись не найдена", show_alert=True)
+            return ConversationHandler.END
+        deactivate_order_info(info_id)
+        await notify_replacement_done(info, context)
+        await query.message.reply_text(
+            "Заказ для подмены завершён и убран из списка.", reply_markup=admin_panel_keyboard()
+        )
     elif data == "admin_balance":
         await query.message.reply_text("Введите Telegram ID пользователя для просмотра баланса:")
         return WAIT_ADMIN_BALANCE
@@ -1145,6 +1349,37 @@ async def admin_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await context.bot.send_message(tg_id, f"💬 Сообщение от администратора:\n{text}")
     await update.message.reply_text("Сообщение отправлено. Теперь введите сумму заказа (₽):")
     return WAIT_ADMIN_SUM
+
+
+async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    info_id = context.user_data.get('replacement_info_id')
+    field_key = context.user_data.get('replacement_field')
+    if not info_id or not field_key:
+        await update.message.reply_text("Запись не выбрана", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+
+    value = update.message.text.strip()
+    mapping = {
+        "orderid": "order_number",
+        "token2": "token2",
+        "cardx": "card_x",
+        "extid": "external_id",
+        "link": "link",
+    }
+    column = mapping.get(field_key)
+    if not column:
+        await update.message.reply_text("Неизвестное поле", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+
+    update_order_info_field(info_id, **{column: value})
+    context.user_data.pop('replacement_info_id', None)
+    context.user_data.pop('replacement_field', None)
+
+    info = get_order_info(info_id)
+    await update.message.reply_text(
+        "Сохранено", reply_markup=replacement_fields_keyboard(info)
+    )
+    return ConversationHandler.END
 
 
 async def admin_balance_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1266,6 +1501,14 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=payment_choice_keyboard(order_id),
     )
 
+    await update.message.reply_text(
+        "Добавить заказ для подмены?",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Добавить", callback_data=f"replacement_offer_add_{order_id}")],
+            [InlineKeyboardButton("Нет", callback_data=f"replacement_offer_skip_{order_id}")],
+        ]),
+    )
+
     return ConversationHandler.END
 
 
@@ -1359,7 +1602,7 @@ def main():
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_balance|admin_orders|admin_broadcast|admin_toggle|admin_status)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_balance|admin_orders|admin_broadcast|admin_toggle|admin_status|admin_replacements|replacement_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
@@ -1367,6 +1610,7 @@ def main():
             WAIT_ADMIN_BALANCE_UPDATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_balance_update)],
             WAIT_ADMIN_ORDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_orders_lookup)],
             WAIT_ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast)],
+            WAIT_REPLACEMENT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_replacement_save)],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
@@ -1377,7 +1621,7 @@ def main():
     app.add_handler(admin_conv_handler)
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|pay_balance_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|pay_balance_|replacement_|admin_replacements)"))
 
     # Меню пользователя
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
