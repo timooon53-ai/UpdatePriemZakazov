@@ -1,6 +1,5 @@
 import logging
 import os
-import sqlite3
 from typing import Dict
 
 import vk_api
@@ -8,7 +7,7 @@ from vk_api.bot_longpoll import VkBotEventType, VkBotLongPoll
 from vk_api.keyboard import VkKeyboard, VkKeyboardColor
 
 from cfg import *  # noqa: F401,F403
-from main import add_user, create_order, get_user, init_db, ensure_default_order_info
+from main import add_user, create_order, ensure_default_order_info, get_user, init_db
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 logging.basicConfig(
