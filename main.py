@@ -25,11 +25,36 @@ DEFAULT_TOKEN2 = (os.getenv("DEFAULT_TOKEN2") or "").strip()
 DB_PATH = DB_PATH
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
 
-TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "Реквизиты уточните у оператора").strip()
-SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "Реквизиты уточните у оператора").strip()
-LTC_WALLET = (os.getenv("LTC_WALLET") or locals().get("LTC_WALLET") or "Кошелек уточните у оператора").strip()
-USDT_TRC20_WALLET = (os.getenv("USDT_TRC20_WALLET") or locals().get("USDT_TRC20_WALLET") or "Кошелек уточните у оператора").strip()
-USDT_TRX_WALLET = (os.getenv("USDT_TRX_WALLET") or locals().get("USDT_TRX_WALLET") or "Кошелек уточните у оператора").strip()
+TRANSFER_DETAILS = (
+    os.getenv("TRANSFER_DETAILS")
+    or locals().get("CARD")
+    or locals().get("TRANSFER_DETAILS")
+    or "Реквизиты уточните у оператора"
+).strip()
+SBP_DETAILS = (
+    os.getenv("SBP_DETAILS")
+    or locals().get("SBP")
+    or locals().get("SBP_DETAILS")
+    or "Реквизиты уточните у оператора"
+).strip()
+LTC_WALLET = (
+    os.getenv("LTC_WALLET")
+    or locals().get("LTC")
+    or locals().get("LTC_WALLET")
+    or "Кошелек уточните у оператора"
+).strip()
+USDT_TRC20_WALLET = (
+    os.getenv("USDT_TRC20_WALLET")
+    or locals().get("RC")
+    or locals().get("USDT_TRC20_WALLET")
+    or "Кошелек уточните у оператора"
+).strip()
+USDT_TRX_WALLET = (
+    os.getenv("USDT_TRX_WALLET")
+    or locals().get("TRX")
+    or locals().get("USDT_TRX_WALLET")
+    or "Кошелек уточните у оператора"
+).strip()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -676,6 +701,27 @@ def format_mono(text: str) -> str:
     return f"<code>{text}</code>"
 
 
+CRYPTO_PAYMENT_METHODS = {
+    "ltc": {"id": "litecoin", "symbol": "LTC"},
+    "usdt_trc20": {"id": "tether", "symbol": "USDT"},
+    "usdt_trx": {"id": "tether", "symbol": "USDT"},
+}
+
+
+def fetch_crypto_rates():
+    ids = ",".join({info["id"] for info in CRYPTO_PAYMENT_METHODS.values()})
+    url = "https://api.coingecko.com/api/v3/simple/price"
+    params = {"ids": ids, "vs_currencies": "rub"}
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return {key: data.get(key, {}).get("rub") for key in ids.split(",")}
+    except Exception as e:
+        logger.error(f"Не удалось получить курс криптовалют: {e}")
+        return {}
+
+
 def payment_methods_keyboard(prefix: str, order_id: int | None = None):
     base = prefix
     if order_id is not None:
@@ -850,10 +896,29 @@ def payment_requisites(method: str):
     return mapping.get(method, "Реквизиты уточните у оператора")
 
 
-async def build_and_send_payment(user_id: int, method: str, amount: float, context: ContextTypes.DEFAULT_TYPE, target, type_="topup", order_id=None):
-    comment_code = None if method in {"ltc", "usdt_trc20", "usdt_trx"} else generate_comment()
+async def build_and_send_payment(
+    user_id: int,
+    method: str,
+    amount: float | None,
+    context: ContextTypes.DEFAULT_TYPE,
+    target,
+    type_: str = "topup",
+    order_id=None,
+):
+    comment_code = None if method in CRYPTO_PAYMENT_METHODS else generate_comment()
     requisites = payment_requisites(method)
+    is_crypto = method in CRYPTO_PAYMENT_METHODS
+    crypto_rate = None
+    crypto_amount = None
+
     currency = "LTC" if method == "ltc" else ("USDT" if method.startswith("usdt") else "RUB")
+
+    if is_crypto:
+        rates = fetch_crypto_rates()
+        crypto_id = CRYPTO_PAYMENT_METHODS[method]["id"]
+        crypto_rate = rates.get(crypto_id)
+        if amount and crypto_rate:
+            crypto_amount = round(amount / crypto_rate, 6)
 
     payment_id = create_payment(
         tg_id=user_id,
@@ -876,9 +941,22 @@ async def build_and_send_payment(user_id: int, method: str, amount: float, conte
     parts = [
         "💰 Детали оплаты:",
         f"Метод: {method_titles.get(method, method)}",
-        f"Сумма: {amount:.2f} {currency}",
-        f"Реквизиты: {format_mono(requisites)}",
     ]
+
+    if amount is None and is_crypto:
+        parts.append("Сумма: выберите нужную сумму и отправьте перевод на указанные реквизиты")
+    elif crypto_amount is not None:
+        parts.append(
+            f"Сумма: {crypto_amount:.6f} {currency} (≈ {amount:.2f} ₽)"
+        )
+    elif amount is not None:
+        parts.append(f"Сумма: {amount:.2f} {currency}")
+
+    parts.append(f"Реквизиты: {format_mono(requisites)}")
+
+    if crypto_rate:
+        parts.append(f"Курс: 1 {currency} = {crypto_rate:.2f} ₽ (актуальный)")
+
     if comment_code:
         parts.append(f"Комментарий к переводу: {format_mono(comment_code)}")
     if type_ == "topup":
@@ -969,6 +1047,10 @@ async def topup_method_selected(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
 
     context.user_data["topup_method"] = method
+    if method in CRYPTO_PAYMENT_METHODS:
+        await build_and_send_payment(query.from_user.id, method, None, context, query.message)
+        context.user_data.pop("topup_method", None)
+        return ConversationHandler.END
     await query.message.reply_text("Введите сумму пополнения (от 100 ₽):")
     return WAIT_TOPUP_AMOUNT
 
@@ -1453,12 +1535,14 @@ async def notify_admins_payment(context: ContextTypes.DEFAULT_TYPE, payment_id: 
         "usdt_trc20": "💵 USDT (TRC20)",
         "usdt_trx": "💵 USDT (TRX)",
     }
+    amount_value = payment.get("amount")
+    amount_text = f"{amount_value:.2f}" if amount_value is not None else "—"
     parts = [
         "📥 Новая оплата",
         f"Пользователь: @{user.get('username') or 'не указан'} (ID: {payment.get('tg_id')})",
         f"Тип: {'Пополнение баланса' if payment.get('type') == 'topup' else 'Оплата заказа'}",
         f"Метод: {method_titles.get(method, method)}",
-        f"Сумма: {payment.get('amount', 0):.2f} {payment.get('currency') or 'RUB'}",
+        f"Сумма: {amount_text} {payment.get('currency') or 'RUB'}",
         f"Реквизиты: {payment.get('requisites')}",
     ]
     if payment.get("comment_code"):
