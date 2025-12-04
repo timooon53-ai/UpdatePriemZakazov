@@ -56,6 +56,33 @@ logger = logging.getLogger(__name__)
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(DB_DIR, exist_ok=True)
 
+# Некоторые эндпоинты требуют именно POST-запросы, даже если параметры
+# передаются через строку запроса.
+FORCE_POST_ENDPOINTS = {
+    "https://tc.taxi.yandex.net/3.0/launch",
+    "https://tc.mobile.yandex.net/4.0/persuggest/v1/suggest?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_V4_0",
+    "https://tc.mobile.yandex.net/3.0/routestats?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_0",
+}
+
+
+def perform_request(url: str, *, params=None, json=None, timeout: int = 10):
+    """Отправить запрос с учетом требований к методу.
+
+    Для некоторых URL метод принудительно меняется на POST, чтобы корректно
+    обрабатывались запросы к API.
+    """
+
+    method = "POST" if url in FORCE_POST_ENDPOINTS else "GET"
+    response = requests.request(
+        method,
+        url,
+        params=params,
+        json=json,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response
+
 
 def current_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -852,12 +879,11 @@ def fetch_crypto_rate(method: str):
     if not coin_id:
         return None
     try:
-        resp = requests.get(
+        resp = perform_request(
             "https://api.coingecko.com/api/v3/simple/price",
             params={"ids": coin_id, "vs_currencies": "rub"},
             timeout=10,
         )
-        resp.raise_for_status()
         data = resp.json()
         return float(data.get(coin_id, {}).get("rub") or 0) or None
     except Exception as e:
