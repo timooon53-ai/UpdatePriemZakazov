@@ -27,9 +27,21 @@ USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
 SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
 SBP_BANK_INFO = (os.getenv("SBP_BANK_INFO") or locals().get("SBP_BANK_INFO") or "🔵 Банк ВТБ").strip()
-LTC_WALLET = (os.getenv("LTC_WALLET") or locals().get("LTC_WALLET") or "—").strip()
-USDT_TRC20_WALLET = (os.getenv("USDT_TRC20_WALLET") or locals().get("USDT_TRC20_WALLET") or "—").strip()
-USDT_TRX_WALLET = (os.getenv("USDT_TRX_WALLET") or locals().get("USDT_TRX_WALLET") or "—").strip()
+LTC_WALLET = (
+    os.getenv("LTC_WALLET")
+    or locals().get("LTC_WALLET")
+    or "ltc1q9l65njf0cx2jypuvhtmkkjzrf9aq7ylgfku786"
+).strip()
+USDT_TRC20_WALLET = (
+    os.getenv("USDT_TRC20_WALLET")
+    or locals().get("USDT_TRC20_WALLET")
+    or "TJRe5tyJXMDp7PkUhKN97SQjpV2PR5VRR2"
+).strip()
+USDT_TRX_WALLET = (
+    os.getenv("USDT_TRX_WALLET")
+    or locals().get("USDT_TRX_WALLET")
+    or "TJRe5tyJXMDp7PkUhKN97SQjpV2PR5VRR2"
+).strip()
 
 logging.basicConfig(
     level=logging.INFO,
