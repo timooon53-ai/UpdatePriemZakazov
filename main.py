@@ -24,8 +24,9 @@ DB_DIR = DB_DIR
 DB_PATH = DB_PATH
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
 
-TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "ℹ️ Реквизиты выдаёт оператор").strip()
-SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "ℹ️ Реквизиты выдаёт оператор").strip()
+TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
+SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
+SBP_BANK_INFO = (os.getenv("SBP_BANK_INFO") or locals().get("SBP_BANK_INFO") or "🔵 Банк ВТБ").strip()
 LTC_WALLET = (os.getenv("LTC_WALLET") or locals().get("LTC_WALLET") or "—").strip()
 USDT_TRC20_WALLET = (os.getenv("USDT_TRC20_WALLET") or locals().get("USDT_TRC20_WALLET") or "—").strip()
 USDT_TRX_WALLET = (os.getenv("USDT_TRX_WALLET") or locals().get("USDT_TRX_WALLET") or "—").strip()
@@ -688,7 +689,7 @@ def payment_methods_keyboard(prefix: str, order_id: int | None = None):
         base = f"{prefix}{order_id}_"
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🏦 Перевод", callback_data=f"{base}transfer")],
+            [InlineKeyboardButton("💳 Карта", callback_data=f"{base}transfer")],
             [InlineKeyboardButton("💸 СБП", callback_data=f"{base}sbp")],
             [InlineKeyboardButton("🪙 Litecoin", callback_data=f"{base}ltc")],
             [InlineKeyboardButton("💵 USDT (TRC20)", callback_data=f"{base}usdt_trc20")],
@@ -719,7 +720,7 @@ def admin_search_buttons(order_id):
 
 def payment_choice_keyboard(order_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏦 Перевод", callback_data=f"pay_card_{order_id}")],
+        [InlineKeyboardButton("💳 Карта", callback_data=f"pay_card_{order_id}")],
         [InlineKeyboardButton("💰 Баланс", callback_data=f"pay_balance_{order_id}")],
     ])
 
@@ -865,7 +866,10 @@ def payment_requisites(method: str):
 
 async def build_and_send_payment(user_id: int, method: str, amount: float | None, context: ContextTypes.DEFAULT_TYPE, target, type_="topup", order_id=None):
     comment_code = None if method in {"ltc", "usdt_trc20", "usdt_trx"} else generate_comment()
-    requisites = payment_requisites(method)
+    raw_requisites = payment_requisites(method)
+    display_requisites = raw_requisites
+    if method == "sbp":
+        display_requisites = f"{raw_requisites}\n{SBP_BANK_INFO}"
     currency = "LTC" if method == "ltc" else ("USDT" if method.startswith("usdt") else "RUB")
     original_amount = amount
     original_currency = "RUB"
@@ -889,13 +893,13 @@ async def build_and_send_payment(user_id: int, method: str, amount: float | None
         order_id=order_id,
         currency=currency,
         comment_code=comment_code,
-        requisites=requisites,
+        requisites=display_requisites,
         original_amount=original_amount,
         original_currency=original_currency,
     )
 
     method_titles = {
-        "transfer": "🏦 Перевод",
+        "transfer": "💳 Карта",
         "sbp": "💸 СБП",
         "ltc": "🪙 Litecoin",
         "usdt_trc20": "💵 USDT (TRC20)",
@@ -911,7 +915,11 @@ async def build_and_send_payment(user_id: int, method: str, amount: float | None
         parts.append(
             f"Сумма: {amount:.4f} {currency}" if currency != "RUB" else f"Сумма: {amount:.2f} {currency}"
         )
-    parts.append(f"Реквизиты: {format_mono(requisites)}")
+    requisites_text = format_mono(raw_requisites)
+    if method == "sbp":
+        requisites_text = f"{requisites_text}\n{SBP_BANK_INFO}"
+
+    parts.append(f"Реквизиты: {requisites_text}")
     if currency != "RUB" and original_amount is not None:
         parts.append(f"💵 Эквивалент: {original_amount:.2f} {original_currency}")
     if rate_text:
@@ -1485,7 +1493,7 @@ async def notify_admins_payment(context: ContextTypes.DEFAULT_TYPE, payment_id: 
     user = get_user(payment.get("tg_id")) or {}
     method = payment.get("method")
     method_titles = {
-        "transfer": "🏦 Перевод",
+        "transfer": "💳 Карта",
         "sbp": "💸 СБП",
         "ltc": "🪙 Litecoin",
         "usdt_trc20": "💵 USDT (TRC20)",
