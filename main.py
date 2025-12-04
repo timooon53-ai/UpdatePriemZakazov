@@ -1092,6 +1092,7 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_ADDITIONAL,
     WAIT_CHILD_SEAT_TYPE,
     WAIT_COMMENT,
+    WAIT_CONFIRMATION,
     WAIT_REPLACEMENT_FIELD,
     WAIT_ADMIN_MESSAGE,
     WAIT_ADMIN_SUM,
@@ -1102,7 +1103,7 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_TOPUP_AMOUNT,
     WAIT_PAYMENT_PROOF,
     WAIT_ADMIN_TOPUP_AMOUNT,
-) = range(20)
+) = range(21)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -1356,15 +1357,54 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             comment=comment,
         )
 
-    increment_orders_count(update.effective_user.id)
-    await update.message.reply_text(
-        f"✅ Ваш заказ №{order_id} создан",
-        reply_markup=main_menu_keyboard(update.effective_user.id),
-    )
-    await notify_admins(context, order_id)
+    context.user_data['order_id'] = order_id
+    await send_order_preview(update.message, order_id)
 
-    context.user_data.clear()
-    return ConversationHandler.END
+    return WAIT_CONFIRMATION
+
+
+async def send_order_preview(target, order_id: int):
+    order = get_order(order_id)
+    if not order:
+        await target.reply_text("❌ Не удалось сформировать предварительный просмотр заказа.")
+        return ConversationHandler.END
+
+    cost_source = order.get("amount") or order.get("base_amount")
+    cost_text = f"{cost_source:.2f} ₽" if cost_source else "Будет рассчитана оператором"
+
+    parts = [
+        f"Предварительный просмотр заказа №{order_id}",
+        f"Тариф: {order.get('tariff') or 'не выбран'}",
+        f"Стоимость: {cost_text}",
+    ]
+
+    if order.get("city"):
+        parts.append(f"Город: {order.get('city')}")
+    if order.get("address_from"):
+        parts.append(f"Откуда: {order.get('address_from')}")
+    if order.get("address_to"):
+        parts.append(f"Куда: {order.get('address_to')}")
+    if order.get("address_extra"):
+        parts.append(f"Доп. адрес: {order.get('address_extra')}")
+    if order.get("child_seat"):
+        parts.append(f"Детское кресло: {order.get('child_seat')}")
+    if order.get("child_seat_type"):
+        parts.append(f"Тип кресла: {order.get('child_seat_type')}")
+    if order.get("wishes"):
+        parts.append(f"Пожелания: {order.get('wishes')}")
+    if order.get("comment"):
+        parts.append(f"Комментарий: {order.get('comment')}")
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("❌ Отменить", callback_data=f"order_cancel_{order_id}"),
+                InlineKeyboardButton("✅ Подтвердить заказ", callback_data=f"order_confirm_{order_id}"),
+            ]
+        ]
+    )
+
+    await target.reply_text("\n".join(parts), reply_markup=keyboard)
 
 
 async def tariff_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1377,6 +1417,45 @@ async def tariff_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=additional_options_keyboard(context.user_data.get('order_data', {})),
     )
     return WAIT_ADDITIONAL
+
+
+async def order_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    _, action, order_id_raw = query.data.split("_", 2)
+    order_id = int(order_id_raw)
+    order = get_order(order_id)
+
+    if not order or order.get("tg_id") != query.from_user.id:
+        await query.answer("Заказ не найден", show_alert=True)
+        return ConversationHandler.END
+
+    if action == "cancel":
+        update_order_status(order_id, "canceled")
+        await query.edit_message_text(f"🚫 Заказ №{order_id} отменён.")
+        await query.message.reply_text(
+            "Возвращаем вас в главное меню.",
+            reply_markup=main_menu_keyboard(query.from_user.id),
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    if order.get("status") == "canceled":
+        await query.answer("Заказ уже отменён", show_alert=True)
+        return ConversationHandler.END
+
+    increment_orders_count(query.from_user.id)
+    await query.edit_message_text(
+        f"✅ Ваш заказ №{order_id} отправлен операторам.",
+    )
+    await query.message.reply_text(
+        "Мы уведомили операторов. Ожидайте, пожалуйста!",
+        reply_markup=main_menu_keyboard(query.from_user.id),
+    )
+    await notify_admins(context, order_id)
+    context.user_data.clear()
+    return ConversationHandler.END
 
 
 async def child_seat_type_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2220,6 +2299,7 @@ def main():
             WAIT_ADDITIONAL: [CallbackQueryHandler(additional_selected, pattern="^additional_")],
             WAIT_CHILD_SEAT_TYPE: [CallbackQueryHandler(child_seat_type_selected, pattern="^seat_type_")],
             WAIT_COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_comment)],
+            WAIT_CONFIRMATION: [CallbackQueryHandler(order_preview_action, pattern="^order_(confirm|cancel)_")],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
