@@ -541,8 +541,8 @@ def set_active_token2(token2: str, tg_id=None):
 def yes_no_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("👍 Да", callback_data="address_yes"),
-            InlineKeyboardButton("👎 Нет", callback_data="address_no"),
+            InlineKeyboardButton("✅ Добавить", callback_data="address_yes"),
+            InlineKeyboardButton("🚫 Пропустить", callback_data="address_no"),
         ]
     ])
 
@@ -595,6 +595,7 @@ def replacement_fields_keyboard(info):
         [InlineKeyboardButton(mark(info.get("order_number"), "OrderID"), callback_data=f"replacement_field_orderid_{info['id']}")],
         [InlineKeyboardButton(mark(info.get("card_x"), "card-x"), callback_data=f"replacement_field_cardx_{info['id']}")],
         [InlineKeyboardButton(mark(info.get("external_id"), "ID"), callback_data=f"replacement_field_extid_{info['id']}")],
+        [InlineKeyboardButton(mark(info.get("token2"), "token2"), callback_data=f"replacement_field_token2_{info['id']}")],
         [InlineKeyboardButton(mark(info.get("link"), "Ссылка"), callback_data=f"replacement_field_link_{info['id']}")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="replacement_back")],
     ])
@@ -1198,6 +1199,7 @@ def replacement_info_text(info):
         f"OrderID: {info.get('order_number') or '—'}",
         f"card-x: {info.get('card_x') or '—'}",
         f"ID: {info.get('external_id') or '—'}",
+        f"token2: {info.get('token2') or '—'}",
         f"Ссылка: {info.get('link') or '—'}",
         f"Связан с заказом №{info.get('order_id') or '—'}",
     ]
@@ -1369,6 +1371,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "orderid": "Пришлите OrderID",
             "cardx": "Пришлите card-x",
             "extid": "Пришлите ID",
+            "token2": "Добавьте token2 для этой подмены",
             "link": "Пришлите ссылку",
         }
         await query.message.reply_text(prompts.get(field_key, "Пришлите значение"))
@@ -1431,6 +1434,7 @@ async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_T
         "orderid": "order_number",
         "cardx": "card_x",
         "extid": "external_id",
+        "token2": "token2",
         "link": "link",
     }
     column = mapping.get(field_key)
