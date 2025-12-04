@@ -26,7 +26,11 @@ DB_DIR = DB_DIR
 DB_PATH = r"bd"
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
 
-ROUTESTATS_URL = (os.getenv("ROUTESTATS_URL") or locals().get("ROUTESTATS_URL"))
+ROUTESTATS_URL = (
+    os.getenv("ROUTESTATS_URL")
+    or locals().get("ROUTESTATS_URL")
+    or "https://tc.mobile.yandex.net/3.0/routestats?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_0"
+)
 
 
 def load_external_tokens():
@@ -1163,6 +1167,7 @@ def build_routestats_payload(order_data: dict):
 
 def fetch_routestats(order_data: dict):
     if not ROUTESTATS_URL:
+        logger.warning("ROUTESTATS_URL не задан, пропускаем запрос routestats")
         return None
 
     address_from = order_data.get("address_from")
@@ -1174,6 +1179,7 @@ def fetch_routestats(order_data: dict):
 
     payload = build_routestats_payload(order_data)
     if not payload:
+        logger.warning("Не удалось собрать payload routestats: нет города или адресов")
         return None
 
     try:
