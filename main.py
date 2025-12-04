@@ -129,6 +129,25 @@ FORCE_POST_ENDPOINTS = {
 }
 
 
+def log_response(response, *, label: str | None = None, max_length: int = 2000):
+    prefix = f"[{label}] " if label else ""
+    try:
+        body = response.text
+        if len(body) > max_length:
+            body = body[:max_length] + "... [truncated]"
+    except Exception as exc:  # pragma: no cover - best-effort logging
+        body = f"<unable to read body: {exc}>"
+
+    logger.info(
+        "%sHTTP %s %s %s",  # noqa: G004
+        prefix,
+        response.request.method,
+        response.url,
+        response.status_code,
+    )
+    logger.info("%sResponse body: %s", prefix, body)
+
+
 def perform_request(url: str, *, params=None, json=None, headers=None, timeout: int = 10):
     """Отправить запрос с учетом требований к методу.
 
@@ -141,6 +160,7 @@ def perform_request(url: str, *, params=None, json=None, headers=None, timeout: 
         preflight_response = requests.post(
             LAUNCH_URL, json={}, headers=LAUNCH_HEADERS, timeout=timeout
         )
+        log_response(preflight_response, label="launch")
         preflight_response.raise_for_status()
 
     method = "POST" if url in FORCE_POST_ENDPOINTS else "GET"
@@ -152,6 +172,7 @@ def perform_request(url: str, *, params=None, json=None, headers=None, timeout: 
         headers=headers,
         timeout=timeout,
     )
+    log_response(response, label="request")
     response.raise_for_status()
     return response
 
