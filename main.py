@@ -1916,18 +1916,28 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     populate_price_from_routestats(context)
     context.user_data['order_id'] = order_id
-    await send_order_preview(update.message, order_id)
+    await send_order_preview(update.message, order_id, context)
 
     return WAIT_CONFIRMATION
 
 
-async def send_order_preview(target, order_id: int):
+async def send_order_preview(target, order_id: int, context: ContextTypes.DEFAULT_TYPE | None = None):
+    if context:
+        order_data = context.user_data.get('order_data') or {}
+        if not (order_data.get('base_amount') or order_data.get('offer')):
+            populate_price_from_routestats(context, force=True)
+
     order = get_order(order_id)
     if not order:
         await target.reply_text("❌ Не удалось сформировать предварительный просмотр заказа.")
         return ConversationHandler.END
 
     cost_source = order.get("amount") or order.get("base_amount")
+    if cost_source is None and context:
+        live_data = context.user_data.get('order_data') or {}
+        cost_source = live_data.get('amount') or live_data.get('base_amount')
+        if cost_source is not None:
+            update_order_fields(order_id, base_amount=cost_source)
     cost_text = f"{cost_source:.2f} ₽" if cost_source else "Будет рассчитана оператором"
 
     parts = [
