@@ -27,6 +27,12 @@ DB_PATH = r"bd"
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
 
 ROUTESTATS_URL = (os.getenv("ROUTESTATS_URL") or locals().get("ROUTESTATS_URL"))
+PERSUGGEST_URL = (
+    os.getenv("PERSUGGEST_URL")
+    or locals().get("PERSUGGEST_URL")
+    or "https://tc.mobile.yandex.net/4.0/persuggest/v1/suggest?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_V4_0"
+)
+PERSUGGEST_HEADERS = json.loads(os.getenv("PERSUGGEST_HEADERS") or "{}")
 
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
 SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
@@ -69,7 +75,7 @@ FORCE_POST_ENDPOINTS = {
 }
 
 
-def perform_request(url: str, *, params=None, json=None, timeout: int = 10):
+def perform_request(url: str, *, params=None, json=None, headers=None, timeout: int = 10):
     """Отправить запрос с учетом требований к методу.
 
     Для некоторых URL метод принудительно меняется на POST, чтобы корректно
@@ -82,6 +88,7 @@ def perform_request(url: str, *, params=None, json=None, timeout: int = 10):
         url,
         params=params,
         json=json,
+        headers=headers,
         timeout=timeout,
     )
     response.raise_for_status()
@@ -150,6 +157,12 @@ def init_db():
             "wishes": "TEXT",
             "base_amount": "REAL",
             "offer": "TEXT",
+            "address_from_log": "TEXT",
+            "address_from_title": "TEXT",
+            "address_from_position": "TEXT",
+            "address_to_log": "TEXT",
+            "address_to_title": "TEXT",
+            "address_to_position": "TEXT",
         }
         for column, definition in new_columns.items():
             if column not in existing_columns:
@@ -697,6 +710,111 @@ def parse_price_value(value):
         return float(cleaned)
     except ValueError:
         return None
+
+
+def build_persuggest_payload(part: str, type_char: str = "a", order_data: dict | None = None):
+    reqid_suffix = random.randint(10**7, 10**8 - 1)
+    payload = {
+        "type": type_char,
+        "part": part,
+        "client_reqid": f"{int(datetime.now().timestamp() * 1000)}_{reqid_suffix}",
+        "session_info": {},
+        "action": "user_input",
+        "state": {
+            "location_available": False,
+            "coord_providers": [],
+            "precise_location_available": False,
+            "wifi_networks": [],
+            "fields": [],
+            "selected_class": (order_data or {}).get("tariff_class", "econom"),
+            "l10n": {
+                "countries": {"system": ["RU"]},
+                "languages": {"system": ["ru-RU"], "app": ["ru"]},
+                "mapkit_lang_region": "ru_RU",
+            },
+            "main_screen_version": "flex_main",
+        },
+    }
+    return payload
+
+
+def extract_persuggest_entry(payload):
+    if not payload:
+        return None
+
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+
+    def iter_candidates(obj):
+        if isinstance(obj, dict):
+            if any(key in obj for key in ("log", "title", "position")):
+                yield obj
+            for value in obj.values():
+                yield from iter_candidates(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                yield from iter_candidates(item)
+
+    for candidate in iter_candidates(payload):
+        title = candidate.get("title") or candidate.get("name")
+        log_value = candidate.get("log")
+        position = candidate.get("position") or candidate.get("pos")
+        if any([title, log_value, position]):
+            return {
+                "title": title,
+                "log": log_value,
+                "position": position,
+            }
+    return None
+
+
+def fetch_persuggest_entry(part: str, type_char: str, order_data: dict | None = None):
+    if not PERSUGGEST_URL:
+        return None
+    payload = build_persuggest_payload(part, type_char, order_data)
+    try:
+        response = perform_request(
+            PERSUGGEST_URL,
+            json=payload,
+            headers=PERSUGGEST_HEADERS or None,
+            timeout=10,
+        )
+        return extract_persuggest_entry(response.json())
+    except Exception as exc:
+        logger.error(f"Не удалось получить persuggest ({type_char}): {exc}")
+        return None
+
+
+def store_persuggest_data(order_data: dict, suggestion: dict, prefix: str):
+    if not suggestion:
+        return
+
+    mapping = {
+        f"{prefix}_log": suggestion.get("log"),
+        f"{prefix}_title": suggestion.get("title"),
+        f"{prefix}_position": suggestion.get("position"),
+    }
+    for key, value in mapping.items():
+        if value is None:
+            continue
+        if key.endswith("_position") and not isinstance(value, str):
+            try:
+                value = json.dumps(value, ensure_ascii=False)
+            except Exception:
+                value = str(value)
+        order_data[key] = value
+
+
+def populate_persuggest_for_address(order_data: dict, address_text: str, point: str):
+    if not address_text:
+        return
+    type_char = "a" if point == "from" else "b"
+    suggestion = fetch_persuggest_entry(address_text, type_char, order_data)
+    prefix = "address_from" if point == "from" else "address_to"
+    store_persuggest_data(order_data, suggestion, prefix)
 
 
 def find_tariff_quote(routestats_payload, target_class: str):
@@ -1387,11 +1505,13 @@ async def topup_amount_entered(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def text_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault('order_data', {})['address_from'] = update.message.text
+    populate_persuggest_for_address(context.user_data.setdefault('order_data', {}), update.message.text, "from")
     await ask_address_to(update, context)
     return WAIT_ADDRESS_TO
 
 async def text_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault('order_data', {})['address_to'] = update.message.text
+    populate_persuggest_for_address(context.user_data.setdefault('order_data', {}), update.message.text, "to")
     await update.message.reply_text("Хотите добавить ещё один адрес?", reply_markup=yes_no_keyboard())
     return WAIT_ADDRESS_THIRD_DECISION
 
@@ -1450,11 +1570,13 @@ async def favorite_address_callback(update: Update, context: ContextTypes.DEFAUL
     data = context.user_data.setdefault('order_data', {})
     if stage == "from":
         data['address_from'] = fav['address']
+        populate_persuggest_for_address(data, fav['address'], "from")
         await query.message.reply_text(f"Адрес откуда выбран: {fav['address']}")
         await ask_address_to(query, context)
         return WAIT_ADDRESS_TO
     if stage == "to":
         data['address_to'] = fav['address']
+        populate_persuggest_for_address(data, fav['address'], "to")
         await query.message.reply_text(f"Адрес куда выбран: {fav['address']}")
         await query.message.reply_text("Хотите добавить ещё один адрес?", reply_markup=yes_no_keyboard())
         return WAIT_ADDRESS_THIRD_DECISION
@@ -1502,11 +1624,20 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         base_amount = data.get('base_amount')
         offer = data.get('offer')
-        if base_amount is not None or offer:
-            update_order_fields(
-                order_id,
-                **{k: v for k, v in {"base_amount": base_amount, "offer": offer}.items() if v is not None},
-            )
+        persuggest_fields = {
+            "address_from_log": data.get("address_from_log"),
+            "address_from_title": data.get("address_from_title"),
+            "address_from_position": data.get("address_from_position"),
+            "address_to_log": data.get("address_to_log"),
+            "address_to_title": data.get("address_to_title"),
+            "address_to_position": data.get("address_to_position"),
+        }
+        extra_fields = {
+            **{k: v for k, v in persuggest_fields.items() if v is not None},
+            **{k: v for k, v in {"base_amount": base_amount, "offer": offer}.items() if v is not None},
+        }
+        if extra_fields:
+            update_order_fields(order_id, **extra_fields)
 
     else:
         order_id = context.user_data.get('order_id')
