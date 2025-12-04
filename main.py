@@ -1,4 +1,3 @@
-from cfg import *
 import os
 import sqlite3
 import logging
@@ -6,6 +5,7 @@ import requests
 import random
 from datetime import datetime
 from functools import wraps
+from cfg import *
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -21,7 +21,7 @@ ADMIN_IDS = ADMIN_IDS
 SCREENSHOTS_DIR = SCREENSHOTS_DIR
 DB_DIR = DB_DIR
 
-DB_PATH = DB_PATH
+DB_PATH = r"bd"
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
 
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
