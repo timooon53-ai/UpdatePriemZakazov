@@ -1052,12 +1052,11 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_ADMIN_BALANCE,
     WAIT_ADMIN_BALANCE_UPDATE,
     WAIT_ADMIN_ORDERS,
-    WAIT_ADMIN_REFRESH,
     WAIT_ADMIN_BROADCAST,
     WAIT_TOPUP_AMOUNT,
     WAIT_PAYMENT_PROOF,
     WAIT_ADMIN_TOPUP_AMOUNT,
-) = range(21)
+) = range(20)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -1704,8 +1703,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Введите Telegram ID пользователя для просмотра его заказов:")
         return WAIT_ADMIN_ORDERS
     elif data == "admin_refresh":
-        await query.message.reply_text("🔁 Введите Telegram ID пользователя для обновления данных:")
-        return WAIT_ADMIN_REFRESH
+        await refresh_all_users(query.message, context)
+        return ConversationHandler.END
     elif data == "admin_broadcast":
         await query.message.reply_text("Введите текст рассылки для всех пользователей:")
         return WAIT_ADMIN_BROADCAST
@@ -1999,36 +1998,38 @@ async def admin_orders_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ConversationHandler.END
 
 
-async def admin_refresh_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        target_id = int(update.message.text.strip())
-    except ValueError:
-        await update.message.reply_text("❌ Введите числовой Telegram ID")
-        return WAIT_ADMIN_REFRESH
+async def refresh_all_users(target, context: ContextTypes.DEFAULT_TYPE):
+    user_ids = get_all_user_ids()
+    if not user_ids:
+        await target.reply_text("ℹ️ В базе пока нет пользователей", reply_markup=admin_panel_keyboard())
+        return
 
-    try:
-        chat = await context.bot.get_chat(target_id)
-    except Exception as e:
-        logger.error(f"Не удалось обновить пользователя {target_id}: {e}")
-        await update.message.reply_text("❌ Не удалось получить данные пользователя", reply_markup=admin_panel_keyboard())
-        return ConversationHandler.END
+    updated = 0
+    checked = 0
+    failed: list[int] = []
 
-    add_user(target_id, chat.username)
-    user = get_user(target_id)
-    if not user:
-        await update.message.reply_text("Пользователь не найден", reply_markup=admin_panel_keyboard())
-        return ConversationHandler.END
+    for uid in user_ids:
+        try:
+            chat = await context.bot.get_chat(uid)
+            db_user = get_user(uid)
+            old_username = db_user.get("username") if db_user else None
+            add_user(uid, chat.username)
+            if chat.username and chat.username != old_username:
+                updated += 1
+            checked += 1
+        except Exception as e:
+            failed.append(uid)
+            logger.error(f"Не удалось обновить пользователя {uid}: {e}")
 
     lines = [
-        "🔁 Данные обновлены:",
-        f"ID: {user.get('tg_id')}",
-        f"Username: @{user.get('username') or 'нет'}",
-        f"Баланс: {user.get('balance', 0):.2f} ₽",
-        f"Город: {user.get('city') or 'не указан'}",
-        f"Заказов: {user.get('orders_count', 0)}",
+        "🔁 Проверка завершена:",
+        f"👥 Проверено пользователей: {checked}",
+        f"✏️ Обновлено username: {updated}",
     ]
-    await update.message.reply_text("\n".join(lines), reply_markup=admin_panel_keyboard())
-    return ConversationHandler.END
+    if failed:
+        lines.append("⚠️ Не удалось обновить: " + ", ".join(map(str, failed)))
+
+    await target.reply_text("\n".join(lines), reply_markup=admin_panel_keyboard())
 
 
 async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2187,7 +2188,6 @@ def main():
             WAIT_ADMIN_BALANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_balance_lookup)],
             WAIT_ADMIN_BALANCE_UPDATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_balance_update)],
             WAIT_ADMIN_ORDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_orders_lookup)],
-            WAIT_ADMIN_REFRESH: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_refresh_lookup)],
             WAIT_ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast)],
             WAIT_REPLACEMENT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_replacement_save)],
             WAIT_ADMIN_TOPUP_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_topup_amount)],
