@@ -1,8 +1,10 @@
+import json
 import os
 import sqlite3
 import logging
 import requests
 import random
+import re
 from datetime import datetime
 from functools import wraps
 from cfg import *
@@ -23,6 +25,8 @@ DB_DIR = DB_DIR
 
 DB_PATH = r"bd"
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
+
+ROUTESTATS_URL = (os.getenv("ROUTESTATS_URL") or locals().get("ROUTESTATS_URL"))
 
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
 SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
@@ -145,6 +149,7 @@ def init_db():
             "child_seat_type": "TEXT",
             "wishes": "TEXT",
             "base_amount": "REAL",
+            "offer": "TEXT",
         }
         for column, definition in new_columns.items():
             if column not in existing_columns:
@@ -655,12 +660,137 @@ def yes_no_keyboard():
     ])
 
 
+TARIFF_OPTIONS = [
+    {"label": "Эконом 💸", "title": "Эконом", "class_key": "econom"},
+    {"label": "Комфорт 😊", "title": "Комфорт", "class_key": "business"},
+    {"label": "Комфорт+ ✨", "title": "Комфорт+", "class_key": "comfortplus"},
+    {"label": "Бизнес 💼", "title": "Бизнес", "class_key": "vip"},
+    {"label": "Премьер 👑", "title": "Премьер", "class_key": "ultimate"},
+    {"label": "Элит 🏆", "title": "Элит", "class_key": "maybach"},
+]
+
+TARIFF_BY_CLASS = {tariff["class_key"]: tariff for tariff in TARIFF_OPTIONS}
+
+
 def tariff_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Эконом 💸", callback_data="tariff_Эконом"), InlineKeyboardButton("Комфорт 😊", callback_data="tariff_Комфорт")],
-        [InlineKeyboardButton("Комфорт+ ✨", callback_data="tariff_Комфорт+"), InlineKeyboardButton("Бизнес 💼", callback_data="tariff_Бизнес")],
-        [InlineKeyboardButton("Премьер 👑", callback_data="tariff_Премьер"), InlineKeyboardButton("Элит 🏆", callback_data="tariff_Элит")],
-    ])
+    buttons = []
+    for idx in range(0, len(TARIFF_OPTIONS), 2):
+        row = []
+        for option in TARIFF_OPTIONS[idx:idx + 2]:
+            row.append(
+                InlineKeyboardButton(
+                    option["label"],
+                    callback_data=f"tariff_{option['class_key']}|{option['title']}"
+                )
+            )
+        buttons.append(row)
+    return InlineKeyboardMarkup(buttons)
+
+
+def parse_price_value(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    cleaned = re.sub(r"[^0-9.,]", "", str(value)).replace(",", ".")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def find_tariff_quote(routestats_payload, target_class: str):
+    if not routestats_payload:
+        return None, None
+
+    payload = routestats_payload
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return None, None
+
+    def iter_candidates(obj):
+        if isinstance(obj, dict):
+            if obj.get("class"):
+                yield obj
+            for key, value in obj.items():
+                if isinstance(value, list):
+                    for item in value:
+                        yield from iter_candidates(item)
+                elif isinstance(value, dict):
+                    yield from iter_candidates(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                yield from iter_candidates(item)
+
+    for candidate in iter_candidates(payload):
+        if candidate.get("class") != target_class:
+            continue
+        details = candidate.get("details")
+        detail_price = None
+        if isinstance(details, list) and details:
+            detail_price = details[0].get("price")
+        price_candidate = (
+            candidate.get("max_price_as_decimal")
+            or candidate.get("min_price_as_decimal")
+            or detail_price
+            or candidate.get("price")
+            or candidate.get("description")
+        )
+        price_value = parse_price_value(price_candidate)
+        return candidate.get("offer"), price_value
+
+    return None, None
+
+
+def build_routestats_payload(order_data: dict):
+    if not order_data:
+        return None
+
+    city = order_data.get("city")
+    address_from = order_data.get("address_from")
+    address_to = order_data.get("address_to")
+
+    if not (city and address_from and address_to):
+        return None
+
+    payload = {
+        "city": city,
+        "from": address_from,
+        "to": address_to,
+    }
+    if order_data.get("address_extra"):
+        payload["address_extra"] = order_data.get("address_extra")
+    return payload
+
+
+def fetch_routestats(order_data: dict):
+    if not ROUTESTATS_URL:
+        return None
+
+    payload = build_routestats_payload(order_data)
+    if not payload:
+        return None
+
+    try:
+        response = perform_request(ROUTESTATS_URL, json=payload, timeout=10)
+        return response.json()
+    except Exception as exc:
+        logger.error(f"Не удалось получить routestats: {exc}")
+        return None
+
+
+def ensure_routestats_response(context: ContextTypes.DEFAULT_TYPE):
+    cached = context.user_data.get("routestats_response")
+    if cached:
+        return cached
+
+    order_data = context.user_data.get("order_data") or {}
+    response = fetch_routestats(order_data)
+    if response is not None:
+        context.user_data["routestats_response"] = response
+    return response
 
 
 def child_seat_type_keyboard():
@@ -1260,6 +1390,7 @@ async def ask_tariff(update_or_query, context):
         target = update_or_query.message
     else:
         target = update_or_query.message
+    ensure_routestats_response(context)
     await target.reply_text("Выберите тариф 🚕", reply_markup=tariff_keyboard())
 
 
@@ -1342,12 +1473,21 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             wishes=", ".join(data.get('wishes', [])) if data.get('wishes') else None,
             comment=comment,
         )
+        base_amount = data.get('base_amount')
+        offer = data.get('offer')
+        if base_amount is not None or offer:
+            update_order_fields(
+                order_id,
+                **{k: v for k, v in {"base_amount": base_amount, "offer": offer}.items() if v is not None},
+            )
 
     else:
         order_id = context.user_data.get('order_id')
         if not order_id:
             await update.message.reply_text("Произошла ошибка: заказ не найден.")
             return ConversationHandler.END
+        base_amount = data.get('base_amount')
+        offer = data.get('offer')
         update_order_fields(
             order_id,
             tariff=data.get('tariff'),
@@ -1355,6 +1495,7 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             child_seat_type=data.get('child_seat_type'),
             wishes=", ".join(data.get('wishes', [])) if data.get('wishes') else None,
             comment=comment,
+            **{k: v for k, v in {"base_amount": base_amount, "offer": offer}.items() if v is not None},
         )
 
     context.user_data['order_id'] = order_id
@@ -1377,6 +1518,8 @@ async def send_order_preview(target, order_id: int):
         f"Тариф: {order.get('tariff') or 'не выбран'}",
         f"Стоимость: {cost_text}",
     ]
+    if order.get("offer"):
+        parts.append(f"Оффер: {order.get('offer')}")
 
     if order.get("city"):
         parts.append(f"Город: {order.get('city')}")
@@ -1410,8 +1553,22 @@ async def send_order_preview(target, order_id: int):
 async def tariff_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    tariff = query.data.split("_", 1)[1]
-    context.user_data.setdefault('order_data', {})['tariff'] = tariff
+    raw_data = query.data.split("_", 1)[1]
+    tariff_class, _, explicit_title = raw_data.partition("|")
+    tariff_info = TARIFF_BY_CLASS.get(tariff_class, {})
+    tariff_title = explicit_title or tariff_info.get("title", tariff_class)
+
+    order_data = context.user_data.setdefault('order_data', {})
+    order_data['tariff'] = tariff_title
+    order_data['tariff_class'] = tariff_class
+    routestats_response = ensure_routestats_response(context)
+    offer, base_price = find_tariff_quote(routestats_response, tariff_class)
+    if offer:
+        order_data['offer'] = offer
+    if base_price is not None:
+        order_data['base_amount'] = base_price
+        if order_id := context.user_data.get('order_id'):
+            update_order_fields(order_id, base_amount=base_price)
     await query.message.reply_text(
         "Выберите доп. опции по необходимости",
         reply_markup=additional_options_keyboard(context.user_data.get('order_data', {})),
@@ -1543,6 +1700,8 @@ async def notify_admins(context, order_id):
         parts.append(f"Доп. адрес: {order.get('address_extra')}")
     if order.get("tariff"):
         parts.append(f"Тариф: {order.get('tariff')}")
+    if order.get("offer"):
+        parts.append(f"Оффер: {order.get('offer')}")
     if order.get("child_seat"):
         parts.append(f"Детское кресло: {order.get('child_seat')}")
     if order.get("child_seat_type"):
