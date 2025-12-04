@@ -21,7 +21,7 @@ SCREENSHOTS_DIR = SCREENSHOTS_DIR
 DB_DIR = DB_DIR
 DEFAULT_TOKEN2 = (os.getenv("DEFAULT_TOKEN2") or "").strip()
 
-DB_PATH = r"C:\Users\Administrator\PycharmProjects\UpdatePriemZakazov\db\DB.db"
+DB_PATH = DB_PATH
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
 
 logging.basicConfig(
