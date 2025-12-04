@@ -3,6 +3,7 @@ import os
 import sqlite3
 import logging
 import requests
+import random
 from datetime import datetime
 from functools import wraps
 
@@ -23,6 +24,12 @@ DEFAULT_TOKEN2 = (os.getenv("DEFAULT_TOKEN2") or "").strip()
 
 DB_PATH = DB_PATH
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
+
+TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "Реквизиты уточните у оператора").strip()
+SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "Реквизиты уточните у оператора").strip()
+LTC_WALLET = (os.getenv("LTC_WALLET") or locals().get("LTC_WALLET") or "Кошелек уточните у оператора").strip()
+USDT_TRC20_WALLET = (os.getenv("USDT_TRC20_WALLET") or locals().get("USDT_TRC20_WALLET") or "Кошелек уточните у оператора").strip()
+USDT_TRX_WALLET = (os.getenv("USDT_TRX_WALLET") or locals().get("USDT_TRX_WALLET") or "Кошелек уточните у оператора").strip()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -150,6 +157,25 @@ def init_db():
 
         c.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('ordering_enabled', '1')"
+        )
+
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_id INTEGER,
+                order_id INTEGER,
+                type TEXT,
+                method TEXT,
+                amount REAL,
+                currency TEXT,
+                comment_code TEXT,
+                requisites TEXT,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+            """
         )
 
         conn.commit()
@@ -288,6 +314,41 @@ def get_all_user_ids():
         c = conn.cursor()
         c.execute("SELECT tg_id FROM users")
         return [row[0] for row in c.fetchall()]
+
+
+def create_payment(tg_id, method, amount, type_="topup", order_id=None, currency="RUB", comment_code=None, requisites=None):
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO payments (tg_id, order_id, type, method, amount, currency, comment_code, requisites)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (tg_id, order_id, type_, method, amount, currency, comment_code, requisites),
+        )
+        conn.commit()
+        return c.lastrowid
+
+
+def update_payment(payment_id, **fields):
+    if not fields:
+        return
+    fields["updated_at"] = current_timestamp()
+    placeholders = ", ".join([f"{key}=?" for key in fields.keys()])
+    values = list(fields.values()) + [payment_id]
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(f"UPDATE payments SET {placeholders} WHERE id=?", values)
+        conn.commit()
+
+
+def get_payment(payment_id):
+    with sqlite3.connect(ORDERS_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM payments WHERE id=?", (payment_id,))
+        row = c.fetchone()
+        return dict(row) if row else None
 
 
 def get_user_orders(tg_id, limit=5):
@@ -488,6 +549,7 @@ def profile_keyboard(has_city: bool, has_favorites: bool):
 
     fav_row = [InlineKeyboardButton("⭐ Любимые адреса", callback_data="profile_fav_manage")]
     buttons.append(fav_row)
+    buttons.append([InlineKeyboardButton("💳 Пополнить баланс", callback_data="profile_topup")])
     buttons.append([InlineKeyboardButton("🔙 В главное меню", callback_data="profile_back")])
     return InlineKeyboardMarkup(buttons)
 
@@ -609,6 +671,26 @@ def replacement_list_keyboard(infos):
     buttons.append([InlineKeyboardButton("⬅️ В админку", callback_data="replacement_back")])
     return InlineKeyboardMarkup(buttons)
 
+
+def format_mono(text: str) -> str:
+    return f"<code>{text}</code>"
+
+
+def payment_methods_keyboard(prefix: str, order_id: int | None = None):
+    base = prefix
+    if order_id is not None:
+        base = f"{prefix}{order_id}_"
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🏦 Перевод", callback_data=f"{base}transfer")],
+            [InlineKeyboardButton("💸 СБП", callback_data=f"{base}sbp")],
+            [InlineKeyboardButton("🪙 Litecoin", callback_data=f"{base}ltc")],
+            [InlineKeyboardButton("💵 USDT (TRC20)", callback_data=f"{base}usdt_trc20")],
+            [InlineKeyboardButton("💵 USDT (TRX)", callback_data=f"{base}usdt_trx")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="profile_back")],
+        ]
+    )
+
 def admin_order_buttons(order_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Взял в работу ✅", callback_data=f"take_{order_id}"),
@@ -631,7 +713,7 @@ def admin_search_buttons(order_id):
 
 def payment_choice_keyboard(order_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Карта", callback_data=f"pay_card_{order_id}")],
+        [InlineKeyboardButton("🏦 Перевод", callback_data=f"pay_card_{order_id}")],
         [InlineKeyboardButton("💰 Баланс", callback_data=f"pay_balance_{order_id}")],
     ])
 
@@ -753,6 +835,68 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=back_keyboard())
 
 
+def generate_comment():
+    return str(random.randint(10**7, 10**10 - 1))
+
+
+def payment_requisites(method: str):
+    mapping = {
+        "transfer": TRANSFER_DETAILS,
+        "sbp": SBP_DETAILS,
+        "ltc": LTC_WALLET,
+        "usdt_trc20": USDT_TRC20_WALLET,
+        "usdt_trx": USDT_TRX_WALLET,
+    }
+    return mapping.get(method, "Реквизиты уточните у оператора")
+
+
+async def build_and_send_payment(user_id: int, method: str, amount: float, context: ContextTypes.DEFAULT_TYPE, target, type_="topup", order_id=None):
+    comment_code = None if method in {"ltc", "usdt_trc20", "usdt_trx"} else generate_comment()
+    requisites = payment_requisites(method)
+    currency = "LTC" if method == "ltc" else ("USDT" if method.startswith("usdt") else "RUB")
+
+    payment_id = create_payment(
+        tg_id=user_id,
+        method=method,
+        amount=amount,
+        type_=type_,
+        order_id=order_id,
+        currency=currency,
+        comment_code=comment_code,
+        requisites=requisites,
+    )
+
+    method_titles = {
+        "transfer": "🏦 Перевод",
+        "sbp": "💸 СБП",
+        "ltc": "🪙 Litecoin",
+        "usdt_trc20": "💵 USDT (TRC20)",
+        "usdt_trx": "💵 USDT (TRX)",
+    }
+    parts = [
+        "💰 Детали оплаты:",
+        f"Метод: {method_titles.get(method, method)}",
+        f"Сумма: {amount:.2f} {currency}",
+        f"Реквизиты: {format_mono(requisites)}",
+    ]
+    if comment_code:
+        parts.append(f"Комментарий к переводу: {format_mono(comment_code)}")
+    if type_ == "topup":
+        parts.append("После оплаты нажмите кнопку ниже.")
+    else:
+        parts.append("После оплаты сообщите об оплате ниже, мы проверим и подтвердим заказ.")
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Оплатил", callback_data=f"payment_paid_{payment_id}")],
+            [InlineKeyboardButton("🔄 Проверить оплату", callback_data=f"payment_check_{payment_id}")],
+            [InlineKeyboardButton("❌ Отменить", callback_data=f"payment_cancel_{payment_id}")],
+        ]
+    )
+    await target.reply_text("\n".join(parts), reply_markup=keyboard, parse_mode="HTML")
+    return payment_id
+
+
 async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -799,6 +943,54 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif data == "profile_fav_back":
         await send_profile_info(query.message, user_id, context)
+    elif data == "profile_topup":
+        await query.message.reply_text(
+            "💳 Выберите способ пополнения", reply_markup=payment_methods_keyboard("topup_")
+        )
+
+
+async def topup_method_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    method = data.split("_", 1)[1]
+    user = get_user(query.from_user.id)
+    if not user:
+        await query.message.reply_text("Пользователь не найден")
+        return ConversationHandler.END
+
+    balance = user.get("balance", 0)
+    if balance < 0:
+        amount = abs(balance)
+        await query.message.reply_text(
+            f"Ваш баланс отрицательный ({balance:.2f} ₽). Сумма к оплате: {amount:.2f} ₽"
+        )
+        await build_and_send_payment(query.from_user.id, method, amount, context, query.message)
+        return ConversationHandler.END
+
+    context.user_data["topup_method"] = method
+    await query.message.reply_text("Введите сумму пополнения (от 100 ₽):")
+    return WAIT_TOPUP_AMOUNT
+
+
+async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, order_id, method = query.data.split("_", 2)
+    order_id = int(order_id)
+    order = get_order(order_id)
+    if not order:
+        await query.message.reply_text("Заказ не найден")
+        return ConversationHandler.END
+    amount = order.get("amount") or order.get("base_amount") or 0
+    if not amount:
+        await query.message.reply_text("Сумма заказа не указана, обратитесь к оператору")
+        return ConversationHandler.END
+    await query.message.reply_text(
+        f"К оплате за заказ №{order_id}: {amount:.2f} ₽"
+    )
+    await build_and_send_payment(query.from_user.id, method, amount, context, query.message, type_="order", order_id=order_id)
+    return ConversationHandler.END
 
 
 # ==========================
@@ -822,7 +1014,10 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     WAIT_ADMIN_BALANCE_UPDATE,
     WAIT_ADMIN_ORDERS,
     WAIT_ADMIN_BROADCAST,
-) = range(17)
+    WAIT_TOPUP_AMOUNT,
+    WAIT_PAYMENT_PROOF,
+    WAIT_ADMIN_TOPUP_AMOUNT,
+) = range(20)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -928,6 +1123,24 @@ async def text_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_user_city(update.effective_user.id, city)
     await ask_address_from(update, context)
     return WAIT_ADDRESS_FROM
+
+
+async def topup_amount_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = float(update.message.text.replace(",", "."))
+    except ValueError:
+        await update.message.reply_text("Введите число в рублях")
+        return WAIT_TOPUP_AMOUNT
+    if amount < 100:
+        await update.message.reply_text("Минимальная сумма 100 ₽")
+        return WAIT_TOPUP_AMOUNT
+    method = context.user_data.get("topup_method")
+    if not method:
+        await update.message.reply_text("Способ пополнения не выбран")
+        return ConversationHandler.END
+    await build_and_send_payment(update.effective_user.id, method, amount, context, update.message)
+    context.user_data.pop("topup_method", None)
+    return ConversationHandler.END
 
 async def text_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # сохраняем в user_data (геокодим если нужно)
@@ -1227,6 +1440,45 @@ async def notify_replacement_done(info, context):
         logger.error(f"Не удалось уведомить пользователя {tg_id} о завершении: {e}")
 
 
+async def notify_admins_payment(context: ContextTypes.DEFAULT_TYPE, payment_id: int):
+    payment = get_payment(payment_id)
+    if not payment:
+        return
+    user = get_user(payment.get("tg_id")) or {}
+    method = payment.get("method")
+    method_titles = {
+        "transfer": "🏦 Перевод",
+        "sbp": "💸 СБП",
+        "ltc": "🪙 Litecoin",
+        "usdt_trc20": "💵 USDT (TRC20)",
+        "usdt_trx": "💵 USDT (TRX)",
+    }
+    parts = [
+        "📥 Новая оплата",
+        f"Пользователь: @{user.get('username') or 'не указан'} (ID: {payment.get('tg_id')})",
+        f"Тип: {'Пополнение баланса' if payment.get('type') == 'topup' else 'Оплата заказа'}",
+        f"Метод: {method_titles.get(method, method)}",
+        f"Сумма: {payment.get('amount', 0):.2f} {payment.get('currency') or 'RUB'}",
+        f"Реквизиты: {payment.get('requisites')}",
+    ]
+    if payment.get("comment_code"):
+        parts.append(f"Комментарий: {payment.get('comment_code')}")
+    if payment.get("order_id"):
+        parts.append(f"Заказ: #{payment.get('order_id')}")
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Зачислить ✅", callback_data=f"payapprove_{payment_id}")],
+            [InlineKeyboardButton("Нет 🚫", callback_data=f"paydecline_{payment_id}")],
+        ]
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(admin_id, "\n".join(parts), reply_markup=keyboard)
+        except Exception as e:
+            logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
+
+
 # ==========================
 # CallbackQuery обработка (админ)
 # ==========================
@@ -1307,16 +1559,21 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Заказ не найден", show_alert=True)
             return ConversationHandler.END
         base_amount = order.get("base_amount") or order.get("amount") or 0
-        total = order.get("amount") or 0
         tg_id = order.get("tg_id")
+        total = order.get("amount") or base_amount
         message = (
-            "🚖 Ваше такси уже едет к вам! Ссылка на отслеживание выше!\n"
-            f"💵 Стоимость поездки: {base_amount:.2f} ₽\n"
-            f"💰 Ваша оплата нам: {total:.2f} ₽\n\n"
-            "Оплатить необходимо: ВТБ банк по номеру телефона +79088006072"
+            "🧾 Оплата поездки\n"
+            f"🚗 Заказ №{order_id}\n"
+            f"💵 Стоимость: {base_amount:.2f} ₽\n"
+            f"К оплате: {total:.2f} ₽\n\n"
+            "Выберите удобный способ оплаты:" 
         )
-        await context.bot.send_message(tg_id, message)
-        await query.message.reply_text("💳 Инструкция по оплате отправлена пользователю")
+        await context.bot.send_message(
+            tg_id,
+            message,
+            reply_markup=payment_methods_keyboard("orderpay_", order_id),
+        )
+        await query.message.reply_text("Меню оплаты отправлено клиенту")
     elif data.startswith("pay_balance_"):
         order_id = int(data.split("_")[2])
         order = get_order(order_id)
@@ -1407,6 +1664,44 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_status":
         status = "✅ Приём заказов включён" if is_ordering_enabled() else "🚧 Приём заказов выключен"
         await query.message.reply_text(status, reply_markup=admin_panel_keyboard())
+    elif data.startswith("payapprove_"):
+        payment_id = int(data.rsplit("_", 1)[1])
+        payment = get_payment(payment_id)
+        if not payment:
+            await query.message.reply_text("Платёж не найден")
+            return ConversationHandler.END
+        user_id = payment.get("tg_id")
+        method = payment.get("method")
+        if payment.get("type") == "order":
+            order_id = payment.get("order_id")
+            if order_id:
+                update_order_status(order_id, "paid")
+            update_payment(payment_id, status="success")
+            await context.bot.send_message(user_id, "✅ Оплата за поездку подтверждена! Спасибо!")
+            await query.message.reply_text("Оплата отмечена как успешная")
+            return ConversationHandler.END
+
+        if method in {"ltc", "usdt_trc20", "usdt_trx"}:
+            context.user_data['admin_topup_payment'] = payment_id
+            await query.message.reply_text("Введите сумму для зачисления на баланс:")
+            return WAIT_ADMIN_TOPUP_AMOUNT
+
+        amount = payment.get("amount") or 0
+        update_balance(user_id, amount)
+        update_payment(payment_id, status="success")
+        await context.bot.send_message(user_id, f"💰 Баланс пополнен на {amount:.2f} ₽")
+        await query.message.reply_text("Баланс пополнен")
+    elif data.startswith("paydecline_"):
+        payment_id = int(data.rsplit("_", 1)[1])
+        payment = get_payment(payment_id)
+        update_payment(payment_id, status="declined")
+        await query.message.reply_text("Отмечено как не найдено")
+        if payment:
+            await context.bot.send_message(
+                payment.get("tg_id"),
+                "Оплата не найдена. Пришлите, пожалуйста, чек в ответном сообщении или свяжитесь с оператором.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📄 Чек", callback_data=f"payment_receipt_{payment_id}")]]),
+            )
 
 
 # ==========================
@@ -1500,6 +1795,88 @@ async def admin_balance_update(update: Update, context: ContextTypes.DEFAULT_TYP
         f"✅ Баланс пользователя @{user.get('username') or 'не указан'} обновлён: {new_balance:.2f} ₽",
         reply_markup=admin_panel_keyboard(),
     )
+    return ConversationHandler.END
+
+
+async def admin_topup_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    payment_id = context.user_data.get('admin_topup_payment')
+    if not payment_id:
+        await update.message.reply_text("Платёж не выбран")
+        return ConversationHandler.END
+    try:
+        amount = float(update.message.text.replace(",", "."))
+    except ValueError:
+        await update.message.reply_text("Введите сумму числом")
+        return WAIT_ADMIN_TOPUP_AMOUNT
+    payment = get_payment(payment_id)
+    if not payment:
+        await update.message.reply_text("Платёж не найден")
+        return ConversationHandler.END
+    update_balance(payment.get("tg_id"), amount)
+    update_payment(payment_id, status="success", amount=amount)
+    await update.message.reply_text("Баланс пополнен по крипто-оплате")
+    await context.bot.send_message(payment.get("tg_id"), f"💰 Баланс пополнен на {amount:.2f}")
+    context.user_data.pop('admin_topup_payment', None)
+    return ConversationHandler.END
+
+
+async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if data.startswith("payment_paid_"):
+        payment_id = int(data.rsplit("_", 1)[1])
+        update_payment(payment_id, status="waiting_admin")
+        await query.message.reply_text("✅ Заявка на оплату отправлена администратору")
+        await notify_admins_payment(context, payment_id)
+    elif data.startswith("payment_check_"):
+        await query.message.reply_text("⏳ Проверяем оплату, пожалуйста, ждите")
+    elif data.startswith("payment_cancel_"):
+        payment_id = int(data.rsplit("_", 1)[1])
+        update_payment(payment_id, status="cancelled")
+        await query.message.reply_text(
+            "Отмена операции", reply_markup=main_menu_keyboard(query.from_user.id)
+        )
+    elif data.startswith("payment_receipt_"):
+        payment_id = int(data.rsplit("_", 1)[1])
+        context.user_data['waiting_receipt'] = payment_id
+        await query.message.reply_text("Пришлите чек (фото или файл)")
+        return WAIT_PAYMENT_PROOF
+    return ConversationHandler.END
+
+
+async def payment_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    payment_id = context.user_data.get('waiting_receipt')
+    if not payment_id:
+        await update.message.reply_text("Чек не ожидается")
+        return ConversationHandler.END
+    payment = get_payment(payment_id)
+    if not payment:
+        await update.message.reply_text("Платёж не найден")
+        return ConversationHandler.END
+    caption = (
+        f"Чек по оплате #{payment_id}\n"
+        f"Метод: {payment.get('method')}\n"
+        f"Сумма: {payment.get('amount', 0):.2f} {payment.get('currency') or 'RUB'}"
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            if update.message.photo:
+                photo = update.message.photo[-1]
+                await context.bot.send_photo(admin_id, photo=photo.file_id, caption=caption, reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Зачислить ✅", callback_data=f"payapprove_{payment_id}")],
+                    [InlineKeyboardButton("Нет 🚫", callback_data=f"paydecline_{payment_id}")],
+                ]))
+            elif update.message.document:
+                doc = update.message.document
+                await context.bot.send_document(admin_id, document=doc.file_id, caption=caption, reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Зачислить ✅", callback_data=f"payapprove_{payment_id}")],
+                    [InlineKeyboardButton("Нет 🚫", callback_data=f"paydecline_{payment_id}")],
+                ]))
+        except Exception as e:
+            logger.error(f"Не удалось переслать чек админу {admin_id}: {e}")
+    await update.message.reply_text("Чек отправлен администратору")
+    context.user_data.pop('waiting_receipt', None)
     return ConversationHandler.END
 
 
@@ -1674,7 +2051,7 @@ def main():
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_balance|admin_orders|admin_broadcast|admin_toggle|admin_status|admin_replacements|replacement_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_balance|admin_orders|admin_broadcast|admin_toggle|admin_status|admin_replacements|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
@@ -1683,6 +2060,22 @@ def main():
             WAIT_ADMIN_ORDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_orders_lookup)],
             WAIT_ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast)],
             WAIT_REPLACEMENT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_replacement_save)],
+            WAIT_ADMIN_TOPUP_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_topup_amount)],
+        },
+        fallbacks=[CommandHandler("start", start_over)],
+        per_user=True,
+        per_message=False,
+    )
+
+    payment_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(topup_method_selected, pattern="^topup_"),
+            CallbackQueryHandler(order_payment_method, pattern="^orderpay_"),
+            CallbackQueryHandler(payment_callback, pattern="^payment_")
+        ],
+        states={
+            WAIT_TOPUP_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, topup_amount_entered)],
+            WAIT_PAYMENT_PROOF: [MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, payment_receipt)],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
@@ -1691,9 +2084,10 @@ def main():
 
     app.add_handler(conv_handler)
     app.add_handler(admin_conv_handler)
+    app.add_handler(payment_conv)
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|pay_balance_|replacement_|admin_replacements)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|pay_balance_|replacement_|admin_replacements|payapprove_|paydecline_)"))
 
     # Меню пользователя
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
