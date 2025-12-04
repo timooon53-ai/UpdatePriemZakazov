@@ -1,4 +1,6 @@
+import json
 import os
+import re
 import sqlite3
 import logging
 import requests
@@ -2177,18 +2179,63 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+def _parse_price_text(text: str) -> float | None:
+    match = re.search(r"([0-9]+(?:[.,][0-9]+)?)", text)
+    if not match:
+        return None
+    return float(match.group(1).replace(",", "."))
+
+
+def extract_price_from_routestat(raw_text: str) -> float | None:
+    try:
+        data = json.loads(raw_text)
+    except json.JSONDecodeError:
+        return None
+
+    def walk(node):
+        if isinstance(node, dict):
+            price_block = node.get("price")
+            if isinstance(price_block, dict):
+                price_text = price_block.get("text") or price_block.get("formatted")
+                if price_text:
+                    parsed = _parse_price_text(price_text)
+                    if parsed:
+                        return parsed
+                value = price_block.get("value")
+                if isinstance(value, (int, float)):
+                    return round(float(value) / 100 if value > 1000 else float(value), 2)
+            for val in node.values():
+                found = walk(val)
+                if found is not None:
+                    return found
+        elif isinstance(node, list):
+            for item in node:
+                found = walk(item)
+                if found is not None:
+                    return found
+        return None
+
+    return walk(data)
+
+
+def parse_amount_input(raw_text: str) -> float | None:
+    cleaned = raw_text.replace(" ", "").replace(",", ".")
+    try:
+        value = float(cleaned)
+        return value if value > 0 else None
+    except ValueError:
+        return extract_price_from_routestat(raw_text)
+
+
 # Подтверждение суммы и списание баланса
 async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.replace(" ", "").replace(",", ".")
     order_id = context.user_data.get('order_id')
     if not order_id:
         await update.message.reply_text("Ошибка: заказ не найден")
         return ConversationHandler.END
-    try:
-        amount = float(text)
-        if amount <= 0:
-            raise ValueError
-    except ValueError:
+
+    amount = parse_amount_input(update.message.text)
+    if amount is None:
         await update.message.reply_text("❌ Некорректная сумма, введите число >0")
         return WAIT_ADMIN_SUM
 
