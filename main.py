@@ -148,6 +148,41 @@ def log_response(response, *, label: str | None = None, max_length: int = 2000):
     logger.info("%sResponse body: %s", prefix, body)
 
 
+def _sanitize_headers(headers: dict | None):
+    if not headers:
+        return {}
+
+    masked = {}
+    for key, value in headers.items():
+        lowered = key.lower()
+        if any(sensitive in lowered for sensitive in ("authorization", "oauth", "token", "jws")):
+            masked[key] = "<redacted>"
+        else:
+            masked[key] = value
+    return masked
+
+
+def log_request_details(url: str, *, method: str, headers=None, params=None, json_body=None, label: str | None = None):
+    prefix = f"[{label}] " if label else ""
+    safe_headers = _sanitize_headers(headers or {})
+
+    logger.info("%sSending %s %s", prefix, method, url)
+    if params:
+        try:
+            logger.info("%sParams: %s", prefix, json.dumps(params, ensure_ascii=False))
+        except Exception:
+            logger.info("%sParams: %s", prefix, params)
+
+    if json_body is not None:
+        try:
+            logger.info("%sJSON body: %s", prefix, json.dumps(json_body, ensure_ascii=False))
+        except Exception:
+            logger.info("%sJSON body: %s", prefix, json_body)
+
+    if safe_headers:
+        logger.info("%sHeaders: %s", prefix, safe_headers)
+
+
 def perform_request(url: str, *, params=None, json=None, headers=None, timeout: int = 10):
     """Отправить запрос с учетом требований к методу.
 
@@ -157,6 +192,7 @@ def perform_request(url: str, *, params=None, json=None, headers=None, timeout: 
     """
 
     if url != LAUNCH_URL:
+        log_request_details(LAUNCH_URL, method="POST", headers=LAUNCH_HEADERS, json_body={})
         preflight_response = requests.post(
             LAUNCH_URL, json={}, headers=LAUNCH_HEADERS, timeout=timeout
         )
@@ -164,6 +200,13 @@ def perform_request(url: str, *, params=None, json=None, headers=None, timeout: 
         preflight_response.raise_for_status()
 
     method = "POST" if url in FORCE_POST_ENDPOINTS else "GET"
+    log_request_details(
+        url,
+        method=method,
+        headers=headers,
+        params=params,
+        json_body=json,
+    )
     response = requests.request(
         method,
         url,
