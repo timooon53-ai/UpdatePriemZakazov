@@ -867,7 +867,17 @@ async def run_change_payment_flow(
     stop_keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Остановить потоки ⏹", callback_data=f"change_stop_{session_id}")]]
     )
-    await bot.send_message(chat_id=chat_id, text=start_text, reply_markup=stop_keyboard)
+    with contextlib.suppress(Exception):
+        await bot.send_message(chat_id=chat_id, text=start_text, reply_markup=stop_keyboard)
+
+    logger.info(
+        "Старт смены оплаты: session=%s threads=%s duration=%s proxies=%s info_id=%s",
+        session_id,
+        threads,
+        duration,
+        proxies_label,
+        info.get("id"),
+    )
 
     progress = {"success": 0, "total": 0, "last": None}
 
@@ -886,7 +896,8 @@ async def run_change_payment_flow(
                 body=payload,
                 proxies_label=proxies_label,
             )
-            await bot.send_message(chat_id=chat_id, text=text)
+            with contextlib.suppress(Exception):
+                await bot.send_message(chat_id=chat_id, text=text)
 
     reporter_task = asyncio.create_task(reporter())
 
@@ -899,6 +910,8 @@ async def run_change_payment_flow(
             stop_event=stop_event,
             progress=progress,
         )
+    except Exception:
+        logger.exception("Ошибка во время смены оплаты, session_id=%s", session_id)
     finally:
         stop_event.set()
         change_sessions.pop(session_id, None)
@@ -917,7 +930,8 @@ async def run_change_payment_flow(
         f"Хедеры ответа: {headers_preview}\n"
         f"Ответ: {(last_resp.get('body') or '')[:1000]}"
     )
-    await bot.send_message(chat_id=chat_id, text=finish_text)
+    with contextlib.suppress(Exception):
+        await bot.send_message(chat_id=chat_id, text=finish_text)
 
 
 async def send_change_payment_requests(
@@ -1986,14 +2000,18 @@ async def handle_change_payment_input(update: Update, context: ContextTypes.DEFA
 
         threads = context.user_data.get("change_threads", 1)
         use_proxies = context.user_data.get("change_use_proxies", True) and bool(PROXIES)
-        await run_change_payment_flow(
-            info=info,
-            threads=threads,
-            duration=duration,
-            use_proxies=use_proxies,
-            bot=context.bot,
-            chat_id=update.effective_chat.id,
-        )
+        try:
+            await run_change_payment_flow(
+                info=info,
+                threads=threads,
+                duration=duration,
+                use_proxies=use_proxies,
+                bot=context.bot,
+                chat_id=update.effective_chat.id,
+            )
+        except Exception:
+            logger.exception("Сбой при запуске смены оплаты")
+            await update.message.reply_text("❌ Ошибка при запуске смены оплаты, проверь логи")
 
         context.user_data.pop("change_stage", None)
         context.user_data.pop("change_threads", None)
