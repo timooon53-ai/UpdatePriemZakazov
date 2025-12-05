@@ -6,8 +6,11 @@ import json
 import requests
 import asyncio
 import aiohttp
+import random
+import contextlib
 from datetime import datetime
 from functools import wraps
+from typing import Optional, Dict, Any
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -44,6 +47,7 @@ logger = logging.getLogger(__name__)
 PROXIES = []
 _proxy_index = 0
 _proxy_lock = asyncio.Lock()
+change_sessions = {}
 
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(DB_DIR, exist_ok=True)
@@ -791,22 +795,156 @@ def ensure_change_info_ready(info):
     return all(needed)
 
 
-async def send_change_payment_requests(info, threads: int, duration_seconds: int, use_proxies: bool = True):
+def format_change_progress(
+    *,
+    session_id: int,
+    planned: int,
+    success: int,
+    total: int,
+    last_resp: Optional[Dict[str, Any]],
+    headers: Dict[str, Any],
+    body: Dict[str, Any],
+    proxies_label: str,
+):
+    status = last_resp.get("status") if last_resp else "нет"
+    last_body = (last_resp or {}).get("body") or ""
+    last_headers = (last_resp or {}).get("response_headers") or {}
+
+    headers_json = json.dumps(headers, ensure_ascii=False, indent=2)
+    body_json = json.dumps(body, ensure_ascii=False, indent=2)
+    last_headers_json = json.dumps(last_headers, ensure_ascii=False, indent=2)
+
+    text_parts = [
+        "📊 Промежуточный лог",
+        f"ID сессии: {session_id}",
+        f"Выполнено логических запросов: {total} из {planned}",
+        f"Успешных: {success}",
+        f"Последний статус: {status}",
+        f"Прокси: {proxies_label}",
+        "",
+        "Headers:",
+        headers_json,
+        "",
+        "Body:",
+        body_json,
+        "",
+        "Последний ответ:",
+        last_headers_json if last_headers else "",
+        last_body,
+    ]
+    return "\n".join([part for part in text_parts if part is not None])
+
+
+async def run_change_payment_flow(
+    *,
+    info,
+    threads: int,
+    duration: int,
+    use_proxies: bool,
+    bot,
+    chat_id: int,
+):
+    session_id = random.randint(1_000_000, 9_999_999)
+    stop_event = asyncio.Event()
+    change_sessions[session_id] = {"event": stop_event, "user_id": chat_id}
+
+    headers = change_payment_headers(info.get("token2"))
+    payload = change_payment_payload(info.get("order_number"), info.get("card_x"), info.get("external_id"))
+
+    planned_total = max(1, threads) * max(1, int(duration / 0.42))
+    proxies_label = "ВКЛ" if use_proxies and PROXIES else "ВЫКЛ (или список пуст)"
+
+    start_text = (
+        "Запускаю массовую отправку.\n"
+        f"ID сессии: {session_id}\n"
+        f"Потоки (одновременных запросов): {threads}\n"
+        f"Всего логических запросов: {planned_total}\n"
+        f"Прокси: {proxies_label}\n\n"
+        "Каждые 5 секунд буду присылать лог (headers, body, последний ответ).\n"
+        "Чтобы остановить — нажми «Остановить потоки»."
+    )
+
+    stop_keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Остановить потоки ⏹", callback_data=f"change_stop_{session_id}")]]
+    )
+    await bot.send_message(chat_id=chat_id, text=start_text, reply_markup=stop_keyboard)
+
+    progress = {"success": 0, "total": 0, "last": None}
+
+    async def reporter():
+        while not stop_event.is_set():
+            await asyncio.sleep(5)
+            if progress.get("total", 0) == 0:
+                continue
+            text = format_change_progress(
+                session_id=session_id,
+                planned=planned_total,
+                success=progress.get("success", 0),
+                total=progress.get("total", 0),
+                last_resp=progress.get("last"),
+                headers=headers,
+                body=payload,
+                proxies_label=proxies_label,
+            )
+            await bot.send_message(chat_id=chat_id, text=text)
+
+    reporter_task = asyncio.create_task(reporter())
+
+    try:
+        await send_change_payment_requests(
+            info,
+            threads,
+            duration,
+            use_proxies=use_proxies,
+            stop_event=stop_event,
+            progress=progress,
+        )
+    finally:
+        stop_event.set()
+        change_sessions.pop(session_id, None)
+        reporter_task.cancel()
+        with contextlib.suppress(Exception):
+            await reporter_task
+
+    last_resp = progress.get("last") or {}
+    status = last_resp.get("status") or "нет"
+    proxy_used = last_resp.get("proxy") or "нет"
+    headers_preview = json.dumps(last_resp.get("response_headers") or {}, ensure_ascii=False)[:400]
+    finish_text = (
+        f"Сессия {session_id} завершена.\n"
+        f"Отправлено: {progress.get('total', 0)}, успешно: {progress.get('success', 0)}.\n"
+        f"Последний статус: {status}, прокси: {proxy_used}.\n"
+        f"Хедеры ответа: {headers_preview}\n"
+        f"Ответ: {(last_resp.get('body') or '')[:1000]}"
+    )
+    await bot.send_message(chat_id=chat_id, text=finish_text)
+
+
+async def send_change_payment_requests(
+    info,
+    threads: int,
+    duration_seconds: int,
+    use_proxies: bool = True,
+    stop_event: Optional[asyncio.Event] = None,
+    progress: Optional[Dict[str, Any]] = None,
+):
     headers = change_payment_headers(info.get("token2"))
     payload = change_payment_payload(info.get("order_number"), info.get("card_x"), info.get("external_id"))
 
     request_headers_json = json.dumps(headers, ensure_ascii=False)
     request_body_json = json.dumps(payload, ensure_ascii=False)
 
-    success = 0
-    results = []
+    if stop_event is None:
+        stop_event = asyncio.Event()
+    if progress is None:
+        progress = {"success": 0, "total": 0, "last": None}
+
     end_time = asyncio.get_event_loop().time() + duration_seconds
     delay = 0.42
 
     async with aiohttp.ClientSession() as session:
         async def worker(_: int):
-            nonlocal success
-            while asyncio.get_event_loop().time() < end_time:
+            while asyncio.get_event_loop().time() < end_time and not stop_event.is_set():
                 proxy = await get_next_proxy() if use_proxies else None
                 try:
                     async with session.post(
@@ -819,16 +957,18 @@ async def send_change_payment_requests(info, threads: int, duration_seconds: int
                         text = await resp.text()
                         ok = 200 <= resp.status < 300
                         if ok:
-                            success += 1
+                            progress["success"] = progress.get("success", 0) + 1
 
+                        progress["total"] = progress.get("total", 0) + 1
                         response_headers = dict(resp.headers)
-                        results.append({
+                        last_resp = {
                             "ok": ok,
                             "status": resp.status,
                             "body": text,
                             "proxy": proxy,
                             "response_headers": response_headers,
-                        })
+                        }
+                        progress["last"] = last_resp
 
                         log_request_entry(
                             info_id=info.get("id"),
@@ -843,13 +983,15 @@ async def send_change_payment_requests(info, threads: int, duration_seconds: int
                         )
                 except Exception as exc:  # noqa: BLE001
                     error_text = str(exc)
-                    results.append({
+                    progress["total"] = progress.get("total", 0) + 1
+                    last_resp = {
                         "ok": False,
                         "status": None,
                         "body": error_text,
                         "proxy": proxy,
                         "response_headers": None,
-                    })
+                    }
+                    progress["last"] = last_resp
 
                     log_request_entry(
                         info_id=info.get("id"),
@@ -868,7 +1010,7 @@ async def send_change_payment_requests(info, threads: int, duration_seconds: int
         tasks = [asyncio.create_task(worker(idx)) for idx in range(max(1, threads))]
         await asyncio.gather(*tasks)
 
-    return success, results
+    return progress
 
 # ==========================
 # Геокодирование
@@ -1718,6 +1860,23 @@ async def change_payment_callback(update: Update, context: ContextTypes.DEFAULT_
     data = query.data
     use_proxies = context.user_data.get("change_use_proxies", True)
 
+    if data.startswith("change_stop_"):
+        try:
+            session_id = int(data.rsplit("_", 1)[1])
+        except ValueError:
+            await query.answer("Не удалось распознать сессию", show_alert=True)
+            return
+        session = change_sessions.get(session_id)
+        if not session:
+            await query.answer("Сессия не найдена", show_alert=True)
+            return
+        if session.get("user_id") != user_id:
+            await query.answer("Эта сессия запущена другим админом", show_alert=True)
+            return
+        session.get("event").set()
+        await query.answer("Останавливаю потоки")
+        return
+
     if data == "change_toggle_proxy":
         use_proxies = not use_proxies
         context.user_data["change_use_proxies"] = use_proxies
@@ -1827,51 +1986,18 @@ async def handle_change_payment_input(update: Update, context: ContextTypes.DEFA
 
         threads = context.user_data.get("change_threads", 1)
         use_proxies = context.user_data.get("change_use_proxies", True) and bool(PROXIES)
-        await update.message.reply_text(
-            "Начинаю отправку запросов...",
-            reply_markup=change_payment_keyboard(context.user_data.get("change_use_proxies", True)),
+        await run_change_payment_flow(
+            info=info,
+            threads=threads,
+            duration=duration,
+            use_proxies=use_proxies,
+            bot=context.bot,
+            chat_id=update.effective_chat.id,
         )
-
-        success, results = await send_change_payment_requests(info, threads, duration, use_proxies)
-        total_requests = len(results)
-        fail = total_requests - success
-
-        request_headers_preview = json.dumps(change_payment_headers(info.get("token2")), ensure_ascii=False)[:400]
-        request_body_preview = json.dumps(
-            change_payment_payload(info.get("order_number"), info.get("card_x"), info.get("external_id")),
-            ensure_ascii=False,
-        )[:400]
-
-        details = [
-            f"Потоки: {threads}, длительность: {duration} с, задержка: 0.42 с",
-            f"Отправлено: {total_requests}, успешно: {success}, ошибок: {fail}",
-            f"Хедеры запроса: {request_headers_preview}",
-            f"Тело запроса: {request_body_preview}",
-        ]
-
-        if results:
-            last = results[-1]
-            details.append(
-                f"Последний ответ: статус {last.get('status') or 'нет'} | прокси: {last.get('proxy') or 'нет'}"
-            )
-            headers_preview = last.get("response_headers")
-            if headers_preview:
-                headers_str = json.dumps(headers_preview, ensure_ascii=False)[:400]
-                details.append(f"Хедеры ответа: {headers_str}")
-            body_preview = (last.get("body") or "")[:400]
-            if body_preview:
-                details.append(f"Тело ответа: {body_preview}")
-
-        details.append("Все запросы записаны в таблицу logs_requests.")
 
         context.user_data.pop("change_stage", None)
         context.user_data.pop("change_threads", None)
         context.user_data.pop("change_duration", None)
-
-        await update.message.reply_text(
-            "\n".join(details),
-            reply_markup=change_payment_keyboard(context.user_data.get("change_use_proxies", True)),
-        )
 
 async def admin_balance_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
