@@ -17,15 +17,17 @@ from telegram.ext import (
     filters, ContextTypes, CallbackQueryHandler, ConversationHandler
 )
 
-TOKEN = TOKEN
-ADMIN_IDS = ADMIN_IDS
-SCREENSHOTS_DIR = SCREENSHOTS_DIR
-DB_DIR = DB_DIR
-DEFAULT_TOKEN2 = (os.getenv("DEFAULT_TOKEN2") or "").strip()
+TOKEN = (locals().get("TOKEN") or os.getenv("TOKEN", "")).strip()
+ADMIN_IDS = locals().get("ADMIN_IDS") or []
+SCREENSHOTS_DIR = os.getenv("SCREENSHOTS_DIR", locals().get("SCREENSHOTS_DIR", "screenshots"))
+DB_DIR = os.getenv("DB_DIR", locals().get("DB_DIR", "db"))
+DEFAULT_TOKEN2 = (
+    os.getenv("DEFAULT_TOKEN2") or str(locals().get("DEFAULT_TOKEN2", ""))
+).strip()
 CHANGE_PAYMENT_URL = "https://tc.mobile.yandex.net/3.0/changepayment"
 PROXY_FILE = "proxy.txt"
 
-DB_PATH = r"C:\Users\Administrator\PycharmProjects\UpdatePriemZakazov\db\DB.db"
+DB_PATH = os.path.join(DB_DIR, "DB.db")
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
 
 logging.basicConfig(
