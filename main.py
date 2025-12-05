@@ -3,6 +3,8 @@ import os
 import sqlite3
 import logging
 import requests
+import asyncio
+import aiohttp
 from datetime import datetime
 from functools import wraps
 
@@ -20,6 +22,8 @@ ADMIN_IDS = ADMIN_IDS
 SCREENSHOTS_DIR = SCREENSHOTS_DIR
 DB_DIR = DB_DIR
 DEFAULT_TOKEN2 = (os.getenv("DEFAULT_TOKEN2") or "").strip()
+CHANGE_PAYMENT_URL = "https://tc.mobile.yandex.net/3.0/changepayment"
+PROXY_FILE = "proxy.txt"
 
 DB_PATH = r"C:\Users\Administrator\PycharmProjects\UpdatePriemZakazov\db\DB.db"
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
@@ -34,12 +38,45 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+PROXIES = []
+_proxy_index = 0
+_proxy_lock = asyncio.Lock()
+
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(DB_DIR, exist_ok=True)
 
 
 def current_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def load_proxies():
+    global PROXIES, _proxy_index
+    if not os.path.exists(PROXY_FILE):
+        PROXIES = []
+        _proxy_index = 0
+        logger.warning("proxy.txt не найден, отправка будет без прокси")
+        return
+
+    with open(PROXY_FILE, "r", encoding="utf-8") as f:
+        proxies = [line.strip() for line in f if line.strip()]
+
+    PROXIES = proxies
+    _proxy_index = 0
+    if PROXIES:
+        logger.info("Загружено %d прокси для смены оплаты", len(PROXIES))
+    else:
+        logger.warning("proxy.txt пустой, отправка будет без прокси")
+
+
+async def get_next_proxy():
+    global _proxy_index
+    if not PROXIES:
+        return None
+    async with _proxy_lock:
+        proxy = PROXIES[_proxy_index]
+        _proxy_index = (_proxy_index + 1) % len(PROXIES)
+        return proxy
 
 # ==========================
 # Инициализация БД
@@ -406,6 +443,17 @@ def create_order_info(order_id):
         return c.lastrowid
 
 
+def create_manual_order_info(tg_id=None):
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO orders_info (order_id, tg_id, is_active) VALUES (?, ?, 1)",
+            (None, tg_id),
+        )
+        conn.commit()
+        return c.lastrowid
+
+
 def get_order_info(info_id):
     with sqlite3.connect(ORDERS_DB) as conn:
         conn.row_factory = sqlite3.Row
@@ -465,7 +513,7 @@ def main_menu_keyboard(user_id=None):
         [KeyboardButton("Помощь ❓")],
     ]
     if user_id in ADMIN_IDS:
-        buttons.append([KeyboardButton("Админка ⚙️")])
+        buttons.append([KeyboardButton("Админка ⚙️"), KeyboardButton("Сменить оплату")])
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 def back_keyboard():
@@ -602,6 +650,25 @@ def replacement_list_keyboard(infos):
     buttons.append([InlineKeyboardButton("⬅️ В админку", callback_data="replacement_back")])
     return InlineKeyboardMarkup(buttons)
 
+
+def change_payment_keyboard(use_proxies: bool):
+    proxy_label = "Прокси: ВКЛ" if use_proxies and PROXIES else "Прокси: ВЫКЛ"
+    buttons = [
+        [InlineKeyboardButton("➕ Новые данные", callback_data="change_new")],
+        [InlineKeyboardButton("📂 Выбрать шаблон", callback_data="change_select")],
+        [InlineKeyboardButton(proxy_label, callback_data="change_toggle_proxy")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
+def change_payment_list_keyboard(infos):
+    buttons = []
+    for info in infos:
+        label = f"#{info['id']} | {info.get('order_number') or 'OrderID не указан'}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"change_use_{info['id']}")])
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="change_back")])
+    return InlineKeyboardMarkup(buttons)
+
 def admin_order_buttons(order_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Взял в работу ✅", callback_data=f"take_{order_id}"),
@@ -645,6 +712,68 @@ def admin_panel_keyboard():
 
 async def admin_show_panel(target):
     await target.reply_text("⚙️ Админ-панель", reply_markup=admin_panel_keyboard())
+
+
+# ==========================
+# Смена оплаты
+# ==========================
+def change_payment_headers(token2):
+    return {
+        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Language": "ru",
+        "Content-Type": "application/json; charset=utf-8",
+        "User-Agent": "ru.yandex.ytaxi/700.100.0.500995 (iPhone; iPhone14,4; iOS 18.3.1; Darwin)",
+        "Authorization": f"Bearer {token2}",
+    }
+
+
+def change_payment_payload(orderid, card_x, external_id):
+    return {
+        "orderid": orderid,
+        "payment_method_type": "card",
+        "tips": {"decimal_value": "0", "type": "percent"},
+        "payment_method_id": card_x,
+        "appmetrica_device_id": external_id,
+        "auto_activate_new_pin_code": False,
+        "payment_method_flow": "charge",
+        "pin_code": None,
+    }
+
+
+def ensure_change_info_ready(info):
+    needed = [info.get("order_number"), info.get("token2"), info.get("card_x"), info.get("external_id")]
+    return all(needed)
+
+
+async def send_change_payment_requests(info, total_requests: int, use_proxies: bool = True):
+    headers = change_payment_headers(info.get("token2"))
+    payload = change_payment_payload(info.get("order_number"), info.get("card_x"), info.get("external_id"))
+
+    success = 0
+    results = []
+    async with aiohttp.ClientSession() as session:
+        for _ in range(total_requests):
+            proxy = await get_next_proxy() if use_proxies else None
+            try:
+                async with session.post(
+                    CHANGE_PAYMENT_URL,
+                    json=payload,
+                    headers=headers,
+                    proxy=proxy,
+                    timeout=15,
+                ) as resp:
+                    text = await resp.text()
+                    ok = 200 <= resp.status < 300
+                    success += 1 if ok else 0
+                    results.append({
+                        "ok": ok,
+                        "status": resp.status,
+                        "body": text,
+                        "proxy": proxy,
+                    })
+            except Exception as exc:  # noqa: BLE001
+                results.append({"ok": False, "status": None, "body": str(exc), "proxy": proxy})
+    return success, results
 
 # ==========================
 # Геокодирование
@@ -1464,6 +1593,139 @@ async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_T
     return ConversationHandler.END
 
 
+async def change_payment_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ Только администратор может менять оплату")
+        return
+
+    context.user_data.setdefault("change_use_proxies", True)
+    await update.message.reply_text(
+        "Меню смены оплаты. Можно создать новые данные или выбрать готовые.",
+        reply_markup=change_payment_keyboard(context.user_data.get("change_use_proxies", True)),
+    )
+
+
+async def change_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    if user_id not in ADMIN_IDS:
+        await query.answer("Нет доступа", show_alert=True)
+        return
+
+    data = query.data
+    use_proxies = context.user_data.get("change_use_proxies", True)
+
+    if data == "change_toggle_proxy":
+        use_proxies = not use_proxies
+        context.user_data["change_use_proxies"] = use_proxies
+        await query.edit_message_reply_markup(reply_markup=change_payment_keyboard(use_proxies))
+        return
+
+    if data == "change_new":
+        info_id = create_manual_order_info(user_id)
+        info = get_order_info(info_id)
+        context.user_data["change_active_info"] = info_id
+        await query.message.reply_text(
+            "Создан новый шаблон. Заполни поля:",
+            reply_markup=replacement_fields_keyboard(info),
+        )
+        return
+
+    if data == "change_select":
+        infos = list_active_order_infos()
+        if not infos:
+            await query.message.reply_text(
+                "Нет активных шаблонов. Создай новый через «Новые данные».",
+                reply_markup=change_payment_keyboard(use_proxies),
+            )
+            return
+        await query.message.reply_text(
+            "Выбери шаблон для смены оплаты:",
+            reply_markup=change_payment_list_keyboard(infos),
+        )
+        return
+
+    if data == "change_back":
+        await query.message.reply_text(
+            "Меню смены оплаты", reply_markup=change_payment_keyboard(use_proxies)
+        )
+        return
+
+    if data.startswith("change_use_"):
+        try:
+            info_id = int(data.rsplit("_", 1)[1])
+        except ValueError:
+            await query.message.reply_text("Не удалось определить шаблон")
+            return
+
+        info = get_order_info(info_id)
+        if not info:
+            await query.message.reply_text("Шаблон не найден")
+            return
+
+        context.user_data["change_active_info"] = info_id
+        context.user_data["awaiting_change_requests"] = True
+        text = (
+            "Выбранный шаблон:\n" + replacement_info_text(info) +
+            "\n\nВведите количество запросов (целое число):"
+        )
+        await query.message.reply_text(text)
+        return
+
+
+async def handle_change_requests_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("Нет прав для этой операции")
+        context.user_data.pop("awaiting_change_requests", None)
+        return
+
+    try:
+        total_requests = int(update.message.text.strip())
+        if total_requests <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Введите положительное число запросов")
+        return
+
+    info_id = context.user_data.get("change_active_info")
+    info = get_order_info(info_id) if info_id else None
+    if not info:
+        await update.message.reply_text("Шаблон не найден, выберите заново")
+        context.user_data.pop("awaiting_change_requests", None)
+        return
+
+    if not ensure_change_info_ready(info):
+        await update.message.reply_text(
+            "Не все поля заполнены. Дополните шаблон перед отправкой.",
+            reply_markup=replacement_fields_keyboard(info),
+        )
+        context.user_data.pop("awaiting_change_requests", None)
+        return
+
+    use_proxies = context.user_data.get("change_use_proxies", True) and bool(PROXIES)
+    await update.message.reply_text("Начинаю отправку запросов...")
+
+    success, results = await send_change_payment_requests(info, total_requests, use_proxies)
+    fail = total_requests - success
+    details = []
+    if results:
+        last = results[-1]
+        details.append(
+            f"Последний ответ: статус {last.get('status')} | прокси: {last.get('proxy') or 'нет'}"
+        )
+    summary = (
+        f"Готово. Успешно: {success}/{total_requests}."
+        f" Ошибок: {fail}.\n" + "\n".join(details)
+    )
+    context.user_data.pop("awaiting_change_requests", None)
+    await update.message.reply_text(
+        summary,
+        reply_markup=change_payment_keyboard(context.user_data.get("change_use_proxies", True)),
+    )
+
 async def admin_balance_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target_id = int(update.message.text.strip())
@@ -1648,6 +1910,7 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================
 def main():
     init_db()
+    load_proxies()
     ensure_default_order_info()
     app = ApplicationBuilder().token(TOKEN).build()
 
@@ -1705,12 +1968,17 @@ def main():
     app.add_handler(admin_conv_handler)
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
+    app.add_handler(CallbackQueryHandler(change_payment_callback, pattern="^change_"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|pay_balance_|replacement_|admin_replacements)"))
 
     # Меню пользователя
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         user_id = update.effective_user.id
+
+        if context.user_data.get("awaiting_change_requests"):
+            await handle_change_requests_input(update, context)
+            return
 
         if context.user_data.get("awaiting_token2_for"):
             result = await token2_input(update, context)
@@ -1728,6 +1996,10 @@ def main():
 
         if user_id in ADMIN_IDS and text == "Админка ⚙️":
             await admin_show_panel(update.message)
+            return
+
+        if user_id in ADMIN_IDS and text == "Сменить оплату":
+            await change_payment_start(update, context)
             return
 
         if context.user_data.get("awaiting_fav_action"):
