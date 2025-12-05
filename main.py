@@ -8,6 +8,7 @@ import asyncio
 import aiohttp
 import random
 import contextlib
+import html
 from datetime import datetime
 from functools import wraps
 from typing import Optional, Dict, Any
@@ -810,9 +811,10 @@ def format_change_progress(
     last_body = (last_resp or {}).get("body") or ""
     last_headers = (last_resp or {}).get("response_headers") or {}
 
-    headers_json = json.dumps(headers, ensure_ascii=False, indent=2)
-    body_json = json.dumps(body, ensure_ascii=False, indent=2)
-    last_headers_json = json.dumps(last_headers, ensure_ascii=False, indent=2)
+    headers_json = html.escape(json.dumps(headers, ensure_ascii=False, indent=2))
+    body_json = html.escape(json.dumps(body, ensure_ascii=False, indent=2))
+    last_headers_json = html.escape(json.dumps(last_headers, ensure_ascii=False, indent=2))
+    last_body_json = html.escape(last_body)
 
     text_parts = [
         "📊 Промежуточный лог",
@@ -823,14 +825,14 @@ def format_change_progress(
         f"Прокси: {proxies_label}",
         "",
         "Headers:",
-        headers_json,
+        f"<pre>{headers_json}</pre>",
         "",
         "Body:",
-        body_json,
+        f"<pre>{body_json}</pre>",
         "",
         "Последний ответ:",
-        last_headers_json if last_headers else "",
-        last_body,
+        f"<pre>{last_headers_json}</pre>" if last_headers else "",
+        f"<pre>{last_body_json}</pre>" if last_body else "",
     ]
     return "\n".join([part for part in text_parts if part is not None])
 
@@ -839,7 +841,7 @@ async def run_change_payment_flow(
     *,
     info,
     threads: int,
-    duration: int,
+    total_requests: int,
     use_proxies: bool,
     bot,
     chat_id: int,
@@ -851,7 +853,7 @@ async def run_change_payment_flow(
     headers = change_payment_headers(info.get("token2"))
     payload = change_payment_payload(info.get("order_number"), info.get("card_x"), info.get("external_id"))
 
-    planned_total = max(1, threads) * max(1, int(duration / 0.42))
+    planned_total = max(1, total_requests)
     proxies_label = "ВКЛ" if use_proxies and PROXIES else "ВЫКЛ (или список пуст)"
 
     start_text = (
@@ -871,10 +873,10 @@ async def run_change_payment_flow(
         await bot.send_message(chat_id=chat_id, text=start_text, reply_markup=stop_keyboard)
 
     logger.info(
-        "Старт смены оплаты: session=%s threads=%s duration=%s proxies=%s info_id=%s",
+        "Старт смены оплаты: session=%s threads=%s total_requests=%s proxies=%s info_id=%s",
         session_id,
         threads,
-        duration,
+        planned_total,
         proxies_label,
         info.get("id"),
     )
@@ -897,7 +899,7 @@ async def run_change_payment_flow(
                 proxies_label=proxies_label,
             )
             with contextlib.suppress(Exception):
-                await bot.send_message(chat_id=chat_id, text=text)
+                await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
 
     reporter_task = asyncio.create_task(reporter())
 
@@ -905,7 +907,7 @@ async def run_change_payment_flow(
         await send_change_payment_requests(
             info,
             threads,
-            duration,
+            total_requests,
             use_proxies=use_proxies,
             stop_event=stop_event,
             progress=progress,
@@ -937,7 +939,7 @@ async def run_change_payment_flow(
 async def send_change_payment_requests(
     info,
     threads: int,
-    duration_seconds: int,
+    total_requests: int,
     use_proxies: bool = True,
     stop_event: Optional[asyncio.Event] = None,
     progress: Optional[Dict[str, Any]] = None,
@@ -953,12 +955,17 @@ async def send_change_payment_requests(
     if progress is None:
         progress = {"success": 0, "total": 0, "last": None}
 
-    end_time = asyncio.get_event_loop().time() + duration_seconds
-    delay = 0.42
+    delay = 0.43
+    lock = asyncio.Lock()
 
     async with aiohttp.ClientSession() as session:
         async def worker(_: int):
-            while asyncio.get_event_loop().time() < end_time and not stop_event.is_set():
+            while not stop_event.is_set():
+                async with lock:
+                    in_flight = progress.get("inflight", 0)
+                    if progress.get("total", 0) + in_flight >= total_requests:
+                        return
+                    progress["inflight"] = in_flight + 1
                 proxy = await get_next_proxy() if use_proxies else None
                 try:
                     async with session.post(
@@ -970,10 +977,6 @@ async def send_change_payment_requests(
                     ) as resp:
                         text = await resp.text()
                         ok = 200 <= resp.status < 300
-                        if ok:
-                            progress["success"] = progress.get("success", 0) + 1
-
-                        progress["total"] = progress.get("total", 0) + 1
                         response_headers = dict(resp.headers)
                         last_resp = {
                             "ok": ok,
@@ -982,7 +985,13 @@ async def send_change_payment_requests(
                             "proxy": proxy,
                             "response_headers": response_headers,
                         }
-                        progress["last"] = last_resp
+
+                        async with lock:
+                            progress["inflight"] = max(progress.get("inflight", 1) - 1, 0)
+                            if ok:
+                                progress["success"] = progress.get("success", 0) + 1
+                            progress["total"] = progress.get("total", 0) + 1
+                            progress["last"] = last_resp
 
                         log_request_entry(
                             info_id=info.get("id"),
@@ -997,7 +1006,6 @@ async def send_change_payment_requests(
                         )
                 except Exception as exc:  # noqa: BLE001
                     error_text = str(exc)
-                    progress["total"] = progress.get("total", 0) + 1
                     last_resp = {
                         "ok": False,
                         "status": None,
@@ -1005,7 +1013,10 @@ async def send_change_payment_requests(
                         "proxy": proxy,
                         "response_headers": None,
                     }
-                    progress["last"] = last_resp
+                    async with lock:
+                        progress["inflight"] = max(progress.get("inflight", 1) - 1, 0)
+                        progress["total"] = progress.get("total", 0) + 1
+                        progress["last"] = last_resp
 
                     log_request_entry(
                         info_id=info.get("id"),
@@ -1942,7 +1953,7 @@ async def change_payment_callback(update: Update, context: ContextTypes.DEFAULT_
         context.user_data["change_active_info"] = info_id
         context.user_data["change_stage"] = "threads"
         context.user_data.pop("change_threads", None)
-        context.user_data.pop("change_duration", None)
+        context.user_data.pop("change_requests", None)
         text = (
             "Выбранный шаблон:\n" + replacement_info_text(info) +
             "\n\nВведите количество потоков (одновременных запросов)."
@@ -1970,17 +1981,17 @@ async def handle_change_payment_input(update: Update, context: ContextTypes.DEFA
             return
 
         context.user_data["change_threads"] = threads
-        context.user_data["change_stage"] = "duration"
-        await update.message.reply_text("Сколько секунд выполнять запросы?")
+        context.user_data["change_stage"] = "requests"
+        await update.message.reply_text("Сколько логических запросов отправить?")
         return
 
-    if stage == "duration":
+    if stage == "requests":
         try:
-            duration = int(update.message.text.strip())
-            if duration <= 0:
+            total_requests = int(update.message.text.strip())
+            if total_requests <= 0:
                 raise ValueError
         except ValueError:
-            await update.message.reply_text("Введите длительность в секундах (целое число > 0)")
+            await update.message.reply_text("Введите количество запросов (целое число > 0)")
             return
 
         info_id = context.user_data.get("change_active_info")
@@ -2004,7 +2015,7 @@ async def handle_change_payment_input(update: Update, context: ContextTypes.DEFA
             await run_change_payment_flow(
                 info=info,
                 threads=threads,
-                duration=duration,
+                total_requests=total_requests,
                 use_proxies=use_proxies,
                 bot=context.bot,
                 chat_id=update.effective_chat.id,
@@ -2015,7 +2026,7 @@ async def handle_change_payment_input(update: Update, context: ContextTypes.DEFA
 
         context.user_data.pop("change_stage", None)
         context.user_data.pop("change_threads", None)
-        context.user_data.pop("change_duration", None)
+        context.user_data.pop("change_requests", None)
 
 async def admin_balance_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
