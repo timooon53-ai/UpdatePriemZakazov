@@ -2,6 +2,7 @@ from cfg import *
 import os
 import sqlite3
 import logging
+import json
 import requests
 import asyncio
 import aiohttp
@@ -184,6 +185,22 @@ def init_db():
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
+            )
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS logs_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                info_id INTEGER,
+                method TEXT,
+                request_url TEXT,
+                request_headers TEXT,
+                request_body TEXT,
+                response_status INTEGER,
+                response_headers TEXT,
+                response_body TEXT,
+                proxy TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
@@ -492,6 +509,32 @@ def deactivate_order_info(info_id):
         c.execute("UPDATE orders_info SET is_active=0 WHERE id=?", (info_id,))
         conn.commit()
 
+
+def log_request_entry(*, info_id, method, url, request_headers, request_body, response_status, response_headers, response_body, proxy=None):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO logs_requests (
+                info_id, method, request_url, request_headers, request_body,
+                response_status, response_headers, response_body, proxy
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                info_id,
+                method,
+                url,
+                request_headers,
+                request_body,
+                response_status,
+                response_headers,
+                response_body,
+                proxy,
+            ),
+        )
+        conn.commit()
+
 # ==========================
 # Декоратор проверки админа
 # ==========================
@@ -515,7 +558,7 @@ def main_menu_keyboard(user_id=None):
         [KeyboardButton("Помощь ❓")],
     ]
     if user_id in ADMIN_IDS:
-        buttons.append([KeyboardButton("Админка ⚙️"), KeyboardButton("Сменить оплату")])
+        buttons.append([KeyboardButton("Админка ⚙️")])
     return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
 
 def back_keyboard():
@@ -748,34 +791,83 @@ def ensure_change_info_ready(info):
     return all(needed)
 
 
-async def send_change_payment_requests(info, total_requests: int, use_proxies: bool = True):
+async def send_change_payment_requests(info, threads: int, duration_seconds: int, use_proxies: bool = True):
     headers = change_payment_headers(info.get("token2"))
     payload = change_payment_payload(info.get("order_number"), info.get("card_x"), info.get("external_id"))
 
+    request_headers_json = json.dumps(headers, ensure_ascii=False)
+    request_body_json = json.dumps(payload, ensure_ascii=False)
+
     success = 0
     results = []
+    end_time = asyncio.get_event_loop().time() + duration_seconds
+    delay = 0.42
+
     async with aiohttp.ClientSession() as session:
-        for _ in range(total_requests):
-            proxy = await get_next_proxy() if use_proxies else None
-            try:
-                async with session.post(
-                    CHANGE_PAYMENT_URL,
-                    json=payload,
-                    headers=headers,
-                    proxy=proxy,
-                    timeout=15,
-                ) as resp:
-                    text = await resp.text()
-                    ok = 200 <= resp.status < 300
-                    success += 1 if ok else 0
+        async def worker(_: int):
+            nonlocal success
+            while asyncio.get_event_loop().time() < end_time:
+                proxy = await get_next_proxy() if use_proxies else None
+                try:
+                    async with session.post(
+                        CHANGE_PAYMENT_URL,
+                        json=payload,
+                        headers=headers,
+                        proxy=proxy,
+                        timeout=15,
+                    ) as resp:
+                        text = await resp.text()
+                        ok = 200 <= resp.status < 300
+                        if ok:
+                            success += 1
+
+                        response_headers = dict(resp.headers)
+                        results.append({
+                            "ok": ok,
+                            "status": resp.status,
+                            "body": text,
+                            "proxy": proxy,
+                            "response_headers": response_headers,
+                        })
+
+                        log_request_entry(
+                            info_id=info.get("id"),
+                            method="POST",
+                            url=CHANGE_PAYMENT_URL,
+                            request_headers=request_headers_json,
+                            request_body=request_body_json,
+                            response_status=resp.status,
+                            response_headers=json.dumps(response_headers, ensure_ascii=False),
+                            response_body=text,
+                            proxy=proxy,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    error_text = str(exc)
                     results.append({
-                        "ok": ok,
-                        "status": resp.status,
-                        "body": text,
+                        "ok": False,
+                        "status": None,
+                        "body": error_text,
                         "proxy": proxy,
+                        "response_headers": None,
                     })
-            except Exception as exc:  # noqa: BLE001
-                results.append({"ok": False, "status": None, "body": str(exc), "proxy": proxy})
+
+                    log_request_entry(
+                        info_id=info.get("id"),
+                        method="POST",
+                        url=CHANGE_PAYMENT_URL,
+                        request_headers=request_headers_json,
+                        request_body=request_body_json,
+                        response_status=None,
+                        response_headers=None,
+                        response_body=error_text,
+                        proxy=proxy,
+                    )
+
+                await asyncio.sleep(delay)
+
+        tasks = [asyncio.create_task(worker(idx)) for idx in range(max(1, threads))]
+        await asyncio.gather(*tasks)
+
     return success, results
 
 # ==========================
@@ -1675,65 +1767,111 @@ async def change_payment_callback(update: Update, context: ContextTypes.DEFAULT_
             return
 
         context.user_data["change_active_info"] = info_id
-        context.user_data["awaiting_change_requests"] = True
+        context.user_data["change_stage"] = "threads"
+        context.user_data.pop("change_threads", None)
+        context.user_data.pop("change_duration", None)
         text = (
             "Выбранный шаблон:\n" + replacement_info_text(info) +
-            "\n\nВведите количество запросов (целое число):"
+            "\n\nВведите количество потоков (одновременных запросов)."
         )
         await query.message.reply_text(text)
         return
 
 
-async def handle_change_requests_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_change_payment_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("Нет прав для этой операции")
-        context.user_data.pop("awaiting_change_requests", None)
+        context.user_data.pop("change_stage", None)
         return
 
-    try:
-        total_requests = int(update.message.text.strip())
-        if total_requests <= 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("Введите положительное число запросов")
+    stage = context.user_data.get("change_stage")
+
+    if stage == "threads":
+        try:
+            threads = int(update.message.text.strip())
+            if threads <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Введите целое число потоков больше нуля")
+            return
+
+        context.user_data["change_threads"] = threads
+        context.user_data["change_stage"] = "duration"
+        await update.message.reply_text("Сколько секунд выполнять запросы?")
         return
 
-    info_id = context.user_data.get("change_active_info")
-    info = get_order_info(info_id) if info_id else None
-    if not info or not info.get("is_active"):
-        await update.message.reply_text("Шаблон не найден или уже закрыт, выберите заново")
-        context.user_data.pop("awaiting_change_requests", None)
-        return
+    if stage == "duration":
+        try:
+            duration = int(update.message.text.strip())
+            if duration <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Введите длительность в секундах (целое число > 0)")
+            return
 
-    if not ensure_change_info_ready(info):
+        info_id = context.user_data.get("change_active_info")
+        info = get_order_info(info_id) if info_id else None
+        if not info or not info.get("is_active"):
+            await update.message.reply_text("Шаблон не найден или уже закрыт, выберите заново")
+            context.user_data.pop("change_stage", None)
+            return
+
+        if not ensure_change_info_ready(info):
+            await update.message.reply_text(
+                "Не все поля заполнены. Дополните шаблон перед отправкой.",
+                reply_markup=replacement_fields_keyboard(info),
+            )
+            context.user_data.pop("change_stage", None)
+            return
+
+        threads = context.user_data.get("change_threads", 1)
+        use_proxies = context.user_data.get("change_use_proxies", True) and bool(PROXIES)
         await update.message.reply_text(
-            "Не все поля заполнены. Дополните шаблон перед отправкой.",
-            reply_markup=replacement_fields_keyboard(info),
+            "Начинаю отправку запросов...",
+            reply_markup=change_payment_keyboard(context.user_data.get("change_use_proxies", True)),
         )
-        context.user_data.pop("awaiting_change_requests", None)
-        return
 
-    use_proxies = context.user_data.get("change_use_proxies", True) and bool(PROXIES)
-    await update.message.reply_text("Начинаю отправку запросов...")
+        success, results = await send_change_payment_requests(info, threads, duration, use_proxies)
+        total_requests = len(results)
+        fail = total_requests - success
 
-    success, results = await send_change_payment_requests(info, total_requests, use_proxies)
-    fail = total_requests - success
-    details = []
-    if results:
-        last = results[-1]
-        details.append(
-            f"Последний ответ: статус {last.get('status')} | прокси: {last.get('proxy') or 'нет'}"
+        request_headers_preview = json.dumps(change_payment_headers(info.get("token2")), ensure_ascii=False)[:400]
+        request_body_preview = json.dumps(
+            change_payment_payload(info.get("order_number"), info.get("card_x"), info.get("external_id")),
+            ensure_ascii=False,
+        )[:400]
+
+        details = [
+            f"Потоки: {threads}, длительность: {duration} с, задержка: 0.42 с",
+            f"Отправлено: {total_requests}, успешно: {success}, ошибок: {fail}",
+            f"Хедеры запроса: {request_headers_preview}",
+            f"Тело запроса: {request_body_preview}",
+        ]
+
+        if results:
+            last = results[-1]
+            details.append(
+                f"Последний ответ: статус {last.get('status') or 'нет'} | прокси: {last.get('proxy') or 'нет'}"
+            )
+            headers_preview = last.get("response_headers")
+            if headers_preview:
+                headers_str = json.dumps(headers_preview, ensure_ascii=False)[:400]
+                details.append(f"Хедеры ответа: {headers_str}")
+            body_preview = (last.get("body") or "")[:400]
+            if body_preview:
+                details.append(f"Тело ответа: {body_preview}")
+
+        details.append("Все запросы записаны в таблицу logs_requests.")
+
+        context.user_data.pop("change_stage", None)
+        context.user_data.pop("change_threads", None)
+        context.user_data.pop("change_duration", None)
+
+        await update.message.reply_text(
+            "\n".join(details),
+            reply_markup=change_payment_keyboard(context.user_data.get("change_use_proxies", True)),
         )
-    summary = (
-        f"Готово. Успешно: {success}/{total_requests}."
-        f" Ошибок: {fail}.\n" + "\n".join(details)
-    )
-    context.user_data.pop("awaiting_change_requests", None)
-    await update.message.reply_text(
-        summary,
-        reply_markup=change_payment_keyboard(context.user_data.get("change_use_proxies", True)),
-    )
 
 async def admin_balance_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -1985,8 +2123,8 @@ def main():
         text = update.message.text
         user_id = update.effective_user.id
 
-        if context.user_data.get("awaiting_change_requests"):
-            await handle_change_requests_input(update, context)
+        if context.user_data.get("change_stage"):
+            await handle_change_payment_input(update, context)
             return
 
         if context.user_data.get("awaiting_token2_for"):
@@ -2005,10 +2143,6 @@ def main():
 
         if user_id in ADMIN_IDS and text == "Админка ⚙️":
             await admin_show_panel(update.message)
-            return
-
-        if user_id in ADMIN_IDS and text == "Сменить оплату":
-            await change_payment_start(update, context)
             return
 
         if context.user_data.get("awaiting_fav_action"):
