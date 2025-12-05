@@ -707,6 +707,7 @@ def admin_panel_keyboard():
         [InlineKeyboardButton("📦 Заказы пользователя", callback_data="admin_orders")],
         [InlineKeyboardButton("📢 Рассылка по всем", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🔄 Заказы для подмены", callback_data="admin_replacements")],
+        [InlineKeyboardButton("💰 Сменить оплату", callback_data="admin_change_payment")],
         [InlineKeyboardButton(ordering_label, callback_data="admin_toggle")],
         [InlineKeyboardButton(status_text, callback_data="admin_status")],
     ])
@@ -1532,6 +1533,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             "Заказ для подмены завершён и убран из списка.", reply_markup=admin_panel_keyboard()
         )
+    elif data == "admin_change_payment":
+        context.user_data.setdefault("change_use_proxies", True)
+        await query.message.reply_text(
+            "Меню смены оплаты", reply_markup=change_payment_keyboard(context.user_data.get("change_use_proxies", True))
+        )
+        return ConversationHandler.END
     elif data == "admin_balance":
         await query.message.reply_text("Введите Telegram ID пользователя для просмотра баланса:")
         return WAIT_ADMIN_BALANCE
@@ -1663,8 +1670,8 @@ async def change_payment_callback(update: Update, context: ContextTypes.DEFAULT_
             return
 
         info = get_order_info(info_id)
-        if not info:
-            await query.message.reply_text("Шаблон не найден")
+        if not info or not info.get("is_active"):
+            await query.message.reply_text("Шаблон не найден или уже закрыт")
             return
 
         context.user_data["change_active_info"] = info_id
@@ -1694,8 +1701,8 @@ async def handle_change_requests_input(update: Update, context: ContextTypes.DEF
 
     info_id = context.user_data.get("change_active_info")
     info = get_order_info(info_id) if info_id else None
-    if not info:
-        await update.message.reply_text("Шаблон не найден, выберите заново")
+    if not info or not info.get("is_active"):
+        await update.message.reply_text("Шаблон не найден или уже закрыт, выберите заново")
         context.user_data.pop("awaiting_change_requests", None)
         return
 
@@ -1951,7 +1958,7 @@ def main():
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_balance|admin_orders|admin_broadcast|admin_toggle|admin_status|admin_replacements|replacement_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_balance|admin_orders|admin_broadcast|admin_toggle|admin_status|admin_replacements|admin_change_payment|replacement_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
@@ -1971,7 +1978,7 @@ def main():
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(change_payment_callback, pattern="^change_"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|pay_balance_|replacement_|admin_replacements)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|pay_balance_|replacement_|admin_replacements|admin_change_payment)"))
 
     # Меню пользователя
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
