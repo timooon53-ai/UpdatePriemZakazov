@@ -1,11 +1,21 @@
+import importlib.util
+import json
 import os
 import sqlite3
 import logging
 import requests
 import random
+import re
 from datetime import datetime
 from functools import wraps
-from cfg import *
+
+if importlib.util.find_spec("cfg") is not None:
+    from cfg import *
+else:
+    TOKEN = os.getenv("TOKEN", "")
+    ADMIN_IDS = json.loads(os.getenv("ADMIN_IDS", "[]"))
+    SCREENSHOTS_DIR = os.getenv("SCREENSHOTS_DIR", "screenshots")
+    DB_DIR = os.getenv("DB_DIR", "db")
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -23,6 +33,60 @@ DB_DIR = DB_DIR
 
 DB_PATH = r"bd"
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
+
+ROUTESTATS_URL = (
+    os.getenv("ROUTESTATS_URL")
+    or locals().get("ROUTESTATS_URL")
+    or "https://tc.mobile.yandex.net/3.0/routestats?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_0"
+)
+
+
+def load_external_tokens():
+    token_file = os.path.join(os.getcwd(), "token.txt")
+    token_value = token2_value = None
+
+    if os.path.exists(token_file):
+        with open(token_file, "r", encoding="utf-8") as file:
+            tokens = [line.strip() for line in file.read().splitlines() if line.strip()]
+            if tokens:
+                token_value = tokens[0]
+            if len(tokens) > 1:
+                token2_value = tokens[1]
+
+    token_env = os.getenv("EXTERNAL_TOKEN")
+    token2_env = os.getenv("EXTERNAL_TOKEN2")
+
+    token = token_env or token_value or ""
+    token2 = token2_env or token2_value or token_value or ""
+
+    return token, token2
+
+
+EXTERNAL_TOKEN, EXTERNAL_TOKEN2 = load_external_tokens()
+
+LAUNCH_URL = (
+    os.getenv("LAUNCH_URL")
+    or locals().get("LAUNCH_URL")
+    or "https://tc.taxi.yandex.net/3.0/launch"
+)
+PERSUGGEST_URL = (
+    os.getenv("PERSUGGEST_URL")
+    or locals().get("PERSUGGEST_URL")
+    or "https://tc.mobile.yandex.net/4.0/persuggest/v1/suggest?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_V4_0"
+)
+PERSUGGEST_HEADERS = json.loads(os.getenv("PERSUGGEST_HEADERS") or "{}")
+DEFAULT_LAUNCH_HEADERS = {
+    "User-Agent": "com.yandex.lavka/1.6.0.49 go-platform/0.1.19 Android/",
+    "Pragma": "no-cache",
+    "Accept": "*/*",
+    "Host": "tc.mobile.yandex.net",
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {EXTERNAL_TOKEN2}",
+    "x-oauth-token": EXTERNAL_TOKEN2,
+}
+LAUNCH_HEADERS = json.loads(
+    os.getenv("LAUNCH_HEADERS") or json.dumps(DEFAULT_LAUNCH_HEADERS)
+)
 
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
 SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
@@ -65,21 +129,93 @@ FORCE_POST_ENDPOINTS = {
 }
 
 
-def perform_request(url: str, *, params=None, json=None, timeout: int = 10):
+def log_response(response, *, label: str | None = None, max_length: int = 2000):
+    prefix = f"[{label}] " if label else ""
+    try:
+        body = response.text
+        if len(body) > max_length:
+            body = body[:max_length] + "... [truncated]"
+    except Exception as exc:  # pragma: no cover - best-effort logging
+        body = f"<unable to read body: {exc}>"
+
+    logger.info(
+        "%sHTTP %s %s %s",  # noqa: G004
+        prefix,
+        response.request.method,
+        response.url,
+        response.status_code,
+    )
+    logger.info("%sResponse body: %s", prefix, body)
+
+
+def _sanitize_headers(headers: dict | None):
+    if not headers:
+        return {}
+
+    masked = {}
+    for key, value in headers.items():
+        lowered = key.lower()
+        if any(sensitive in lowered for sensitive in ("authorization", "oauth", "token", "jws")):
+            masked[key] = "<redacted>"
+        else:
+            masked[key] = value
+    return masked
+
+
+def log_request_details(url: str, *, method: str, headers=None, params=None, json_body=None, label: str | None = None):
+    prefix = f"[{label}] " if label else ""
+    safe_headers = _sanitize_headers(headers or {})
+
+    logger.info("%sSending %s %s", prefix, method, url)
+    if params:
+        try:
+            logger.info("%sParams: %s", prefix, json.dumps(params, ensure_ascii=False))
+        except Exception:
+            logger.info("%sParams: %s", prefix, params)
+
+    if json_body is not None:
+        try:
+            logger.info("%sJSON body: %s", prefix, json.dumps(json_body, ensure_ascii=False))
+        except Exception:
+            logger.info("%sJSON body: %s", prefix, json_body)
+
+    if safe_headers:
+        logger.info("%sHeaders: %s", prefix, safe_headers)
+
+
+def perform_request(url: str, *, params=None, json=None, headers=None, timeout: int = 10):
     """Отправить запрос с учетом требований к методу.
 
-    Для некоторых URL метод принудительно меняется на POST, чтобы корректно
+    Перед каждым запросом отправляется обязательный вызов launch, далее
+    для некоторых URL метод принудительно меняется на POST, чтобы корректно
     обрабатывались запросы к API.
     """
 
+    if url != LAUNCH_URL:
+        log_request_details(LAUNCH_URL, method="POST", headers=LAUNCH_HEADERS, json_body={})
+        preflight_response = requests.post(
+            LAUNCH_URL, json={}, headers=LAUNCH_HEADERS, timeout=timeout
+        )
+        log_response(preflight_response, label="launch")
+        preflight_response.raise_for_status()
+
     method = "POST" if url in FORCE_POST_ENDPOINTS else "GET"
+    log_request_details(
+        url,
+        method=method,
+        headers=headers,
+        params=params,
+        json_body=json,
+    )
     response = requests.request(
         method,
         url,
         params=params,
         json=json,
+        headers=headers,
         timeout=timeout,
     )
+    log_response(response, label="request")
     response.raise_for_status()
     return response
 
@@ -145,6 +281,13 @@ def init_db():
             "child_seat_type": "TEXT",
             "wishes": "TEXT",
             "base_amount": "REAL",
+            "offer": "TEXT",
+            "address_from_log": "TEXT",
+            "address_from_title": "TEXT",
+            "address_from_position": "TEXT",
+            "address_to_log": "TEXT",
+            "address_to_title": "TEXT",
+            "address_to_position": "TEXT",
         }
         for column, definition in new_columns.items():
             if column not in existing_columns:
@@ -497,7 +640,19 @@ def update_order_fields(order_id, **fields):
     if not fields:
         return
     placeholders = ", ".join([f"{key}=?" for key in fields.keys()])
-    values = list(fields.values()) + [current_timestamp(), order_id]
+
+    def _serialize(value):
+        if isinstance(value, (dict, list)):
+            try:
+                return json.dumps(value, ensure_ascii=False)
+            except Exception:
+                return str(value)
+        return value
+
+    values = [
+        _serialize(value)
+        for value in fields.values()
+    ] + [current_timestamp(), order_id]
     with sqlite3.connect(ORDERS_DB) as conn:
         c = conn.cursor()
         c.execute(
@@ -655,12 +810,474 @@ def yes_no_keyboard():
     ])
 
 
+TARIFF_OPTIONS = [
+    {"label": "Эконом 💸", "title": "Эконом", "class_key": "econom"},
+    {"label": "Комфорт 😊", "title": "Комфорт", "class_key": "business"},
+    {"label": "Комфорт+ ✨", "title": "Комфорт+", "class_key": "comfortplus"},
+    {"label": "Бизнес 💼", "title": "Бизнес", "class_key": "vip"},
+    {"label": "Премьер 👑", "title": "Премьер", "class_key": "ultimate"},
+    {"label": "Элит 🏆", "title": "Элит", "class_key": "maybach"},
+]
+
+TARIFF_BY_CLASS = {tariff["class_key"]: tariff for tariff in TARIFF_OPTIONS}
+
+
 def tariff_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Эконом 💸", callback_data="tariff_Эконом"), InlineKeyboardButton("Комфорт 😊", callback_data="tariff_Комфорт")],
-        [InlineKeyboardButton("Комфорт+ ✨", callback_data="tariff_Комфорт+"), InlineKeyboardButton("Бизнес 💼", callback_data="tariff_Бизнес")],
-        [InlineKeyboardButton("Премьер 👑", callback_data="tariff_Премьер"), InlineKeyboardButton("Элит 🏆", callback_data="tariff_Элит")],
-    ])
+    buttons = []
+    for idx in range(0, len(TARIFF_OPTIONS), 2):
+        row = []
+        for option in TARIFF_OPTIONS[idx:idx + 2]:
+            row.append(
+                InlineKeyboardButton(
+                    option["label"],
+                    callback_data=f"tariff_{option['class_key']}|{option['title']}"
+                )
+            )
+        buttons.append(row)
+    return InlineKeyboardMarkup(buttons)
+
+
+def parse_price_value(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    cleaned = re.sub(r"[^0-9.,]", "", str(value)).replace(",", ".")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def build_persuggest_payload(part: str, type_char: str = "a", order_data: dict | None = None):
+    reqid_suffix = random.randint(10**7, 10**8 - 1)
+    payload = {
+        "type": type_char,
+        "part": part,
+        "client_reqid": f"{int(datetime.now().timestamp() * 1000)}_{reqid_suffix}",
+        "session_info": {},
+        "action": "user_input",
+        "state": {
+            "location_available": False,
+            "coord_providers": [],
+            "precise_location_available": False,
+            "wifi_networks": [],
+            "fields": [],
+            "selected_class": (order_data or {}).get("tariff_class", "econom"),
+            "l10n": {
+                "countries": {"system": ["RU"]},
+                "languages": {"system": ["ru-RU"], "app": ["ru"]},
+                "mapkit_lang_region": "ru_RU",
+            },
+            "main_screen_version": "flex_main",
+        },
+    }
+    return payload
+
+
+def extract_persuggest_entry(payload):
+    if not payload:
+        return None
+
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+
+    def iter_candidates(obj):
+        if isinstance(obj, dict):
+            if any(key in obj for key in ("log", "title", "position")):
+                yield obj
+            for value in obj.values():
+                yield from iter_candidates(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                yield from iter_candidates(item)
+
+    for candidate in iter_candidates(payload):
+        title = candidate.get("title") or candidate.get("name")
+        log_value = candidate.get("log")
+        position = candidate.get("position") or candidate.get("pos")
+        if any([title, log_value, position]):
+            return {
+                "title": title,
+                "log": log_value,
+                "position": position,
+            }
+    return None
+
+
+def fetch_persuggest_entry(part: str, type_char: str, order_data: dict | None = None):
+    if not PERSUGGEST_URL:
+        return None
+    payload = build_persuggest_payload(part, type_char, order_data)
+    try:
+        response = perform_request(
+            PERSUGGEST_URL,
+            json=payload,
+            headers=PERSUGGEST_HEADERS or None,
+            timeout=10,
+        )
+        return extract_persuggest_entry(response.json())
+    except Exception as exc:
+        logger.error(f"Не удалось получить persuggest ({type_char}): {exc}")
+        return None
+
+
+def store_persuggest_data(order_data: dict, suggestion: dict, prefix: str):
+    if not suggestion:
+        return
+
+    mapping = {
+        f"{prefix}_log": suggestion.get("log"),
+        f"{prefix}_title": suggestion.get("title"),
+        f"{prefix}_position": suggestion.get("position"),
+    }
+    for key, value in mapping.items():
+        if value is None:
+            continue
+        if key.endswith("_position") and not isinstance(value, str):
+            try:
+                value = json.dumps(value, ensure_ascii=False)
+            except Exception:
+                value = str(value)
+        order_data[key] = value
+
+
+def populate_persuggest_for_address(order_data: dict, address_text: str, point: str):
+    if not address_text:
+        return
+    type_char = "a" if point == "from" else "b"
+    suggestion = fetch_persuggest_entry(address_text, type_char, order_data)
+    prefix = "address_from" if point == "from" else "address_to"
+    store_persuggest_data(order_data, suggestion, prefix)
+
+
+def find_tariff_quote(routestats_payload, target_class: str):
+    if not routestats_payload:
+        return None, None
+
+    payload = routestats_payload
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return None, None
+
+    def iter_candidates(obj):
+        if isinstance(obj, dict):
+            if obj.get("class"):
+                yield obj
+            for key, value in obj.items():
+                if isinstance(value, list):
+                    for item in value:
+                        yield from iter_candidates(item)
+                elif isinstance(value, dict):
+                    yield from iter_candidates(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                yield from iter_candidates(item)
+
+    for candidate in iter_candidates(payload):
+        if candidate.get("class") != target_class:
+            continue
+        details = candidate.get("details")
+        detail_price = None
+        if isinstance(details, list) and details:
+            detail_price = details[0].get("price")
+        price_candidate = (
+            candidate.get("max_price_as_decimal")
+            or candidate.get("min_price_as_decimal")
+            or detail_price
+            or candidate.get("price")
+            or candidate.get("description")
+        )
+        price_value = parse_price_value(price_candidate)
+        return candidate.get("offer"), price_value
+
+    return None, None
+
+
+def populate_price_from_routestats(context: ContextTypes.DEFAULT_TYPE, force: bool = False):
+    order_data = context.user_data.setdefault('order_data', {})
+
+    if not force and order_data.get('base_amount') is not None and order_data.get('offer'):
+        return order_data.get('offer'), order_data.get('base_amount')
+
+    if force:
+        context.user_data.pop("routestats_response", None)
+
+    tariff_class = order_data.get('tariff_class')
+    if not tariff_class:
+        return None, None
+
+    routestats_response = ensure_routestats_response(context)
+    offer, base_price = find_tariff_quote(routestats_response, tariff_class)
+
+    fields = {}
+    if offer:
+        order_data['offer'] = offer
+        fields['offer'] = offer
+    if base_price is not None:
+        order_data['base_amount'] = base_price
+        fields['base_amount'] = base_price
+        # Дублируем сумму в общее поле amount, чтобы предпросмотр и другие
+        # части сценария не падали обратно в «будет рассчитана оператором»
+        # из-за пустого amount при наличии вычисленной цены тарифа.
+        if order_data.get('amount') is None:
+            order_data['amount'] = base_price
+            fields.setdefault('amount', base_price)
+
+    if fields and (order_id := context.user_data.get('order_id')):
+        update_order_fields(order_id, **fields)
+
+    return offer, base_price
+
+
+def _normalize_position_value(value):
+    if value is None:
+        return None
+
+    parsed = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            parsed = value
+
+    if isinstance(parsed, dict):
+        if "position" in parsed:
+            parsed = parsed.get("position")
+        elif all(key in parsed for key in ("lon", "lat")):
+            parsed = [parsed.get("lon"), parsed.get("lat")]
+
+    if isinstance(parsed, list) and len(parsed) >= 2:
+        return parsed
+
+    return None
+
+
+def build_routestats_payload(order_data: dict):
+    if not order_data:
+        return None
+
+    city = order_data.get("city")
+    address_from = order_data.get("address_from")
+    address_to = order_data.get("address_to")
+
+    if not (city and address_from and address_to):
+        return None
+
+    from_position = _normalize_position_value(order_data.get("address_from_position"))
+    to_position = _normalize_position_value(order_data.get("address_to_position"))
+
+    state_fields = []
+    for prefix, type_char in (("address_from", "a"), ("address_to", "b")):
+        field_entry = {"type": type_char}
+        title = order_data.get(f"{prefix}_title")
+        log_value = order_data.get(f"{prefix}_log")
+        position = _normalize_position_value(order_data.get(f"{prefix}_position"))
+
+        if title:
+            field_entry["title"] = title
+        if log_value:
+            field_entry["log"] = log_value
+        if position:
+            field_entry["position"] = position
+
+        if any(field_entry.get(key) for key in ("title", "log", "position")):
+            state_fields.append(field_entry)
+
+    route_points = []
+    if from_position:
+        route_points.append(from_position)
+    if to_position:
+        route_points.append(to_position)
+
+    selected_class = order_data.get("tariff_class") or "econom"
+
+    supported_tariff_classes = [
+        "drive",
+        "intercity_preorder",
+        "intercity",
+        "econom",
+        "lite_b2b",
+        "business",
+        "standart_b2b",
+        "comfortplus",
+        "optimum_b2b",
+        "vip",
+        "ultimate",
+        "maybach",
+        "child_tariff",
+        "minivan",
+        "premium_van",
+        "personal_driver",
+        "express",
+        "courier",
+        "cargo",
+        "cargocorp",
+        "selfdriving",
+        "sdd",
+        "scooters",
+        "premium_suv",
+        "suv",
+        "hh_with_ramp_city",
+        "minivan_hh",
+        "hh_with_ramp",
+        "eda",
+        "lavka",
+        "ndd",
+        "combo",
+        "express_d2d",
+        "express_outdoor",
+        "express_d2d_slow",
+        "sdd_short",
+        "sdd_evening",
+        "sdd_long",
+        "ndd_external",
+        "ndd_internal",
+        "express_d2d_veryslow",
+        "captive_rolf",
+        "virtual_orders",
+        "cargo_long",
+        "cargo_express",
+        "cargo_hour",
+        "courier_walking",
+        "sdd_multislot",
+        "cargo_intercity",
+        "rover",
+        "captive_auto",
+        "captive_auto2",
+        "captive_auto3",
+        "envoy",
+        "express_veryslow",
+        "envoy_auto",
+        "envoy_light",
+        "envoy_ultima_performer",
+        "envoy_ultima",
+        "on_click_light",
+        "on_click_auto",
+        "express_fast",
+        "express_econ_slow",
+        "cargo_intercity_ltl",
+        "superexpress_d2d",
+        "superexpress_outdoor",
+        "mkk",
+        "express_econ_d2d_slow",
+    ]
+
+    payload = {
+        "supports_verticals_selector": True,
+        "id": order_data.get("user_id") or order_data.get("tg_id"),
+        "supported_markup": "tml-0.1",
+        "selected_class": selected_class,
+        "supported_verticals": [
+            "drive",
+            "transport",
+            "hub",
+            "intercity",
+            "maas",
+            "taxi",
+            "ultima",
+            "child",
+            "delivery",
+            "rest_tariffs",
+        ],
+        "supports_no_cars_available": True,
+        "supports_unavailable_alternatives": True,
+        "suggest_alternatives": True,
+        "skip_estimated_waiting": False,
+        "supports_paid_options": True,
+        "supports_explicit_antisurge": True,
+        "parks": [],
+        "is_lightweight": False,
+        "tariff_requirements": [{"requirements": {}, "class": cls} for cls in supported_tariff_classes],
+        "enable_fallback_for_tariffs": True,
+        "supported": [
+            {"type": "formatted_prices"},
+            {"type": "multiclass_requirements"},
+            {"type": "multiclasses"},
+            {"type": "plus_promo_alternative"},
+            {"type": "requirements_v2"},
+        ],
+        "with_title": True,
+        "supports_multiclass": True,
+        "supported_vertical_types": ["group"],
+        "supported_features": [
+            {"type": "order_button_actions", "values": ["open_tariff_card", "deeplink"]},
+            {"type": "swap_summary", "values": ["high_tariff_selector"]},
+        ],
+        "state": {
+            "fields": state_fields,
+            "selected_class": selected_class,
+            "l10n": {
+                "countries": {"system": ["RU"]},
+                "languages": {"system": ["ru-RU"], "app": ["ru"]},
+                "mapkit_lang_region": "ru_RU",
+            },
+            "main_screen_version": "flex_main",
+        },
+        "format_currency": True,
+        "route": route_points,
+        "supports_hideable_tariffs": True,
+        "payment": {"type": "cash"},
+        "summary_version": 2,
+        "force_soon_order": False,
+        "account_type": "lite",
+        "size_hint": 300,
+        "extended_description": True,
+        "requirements": {},
+        "selected_class_only": False,
+        "position_accuracy": 0,
+        "zone_name": city,
+        "multiclass_options": {"selected": False, "class": [], "verticals": []},
+        "use_toll_roads": False,
+        "estimate_waiting_selected_only": False,
+    }
+
+    if order_data.get("address_extra"):
+        payload["address_extra"] = order_data.get("address_extra")
+
+    return payload
+
+
+def fetch_routestats(order_data: dict):
+    if not ROUTESTATS_URL:
+        logger.warning("ROUTESTATS_URL не задан, пропускаем запрос routestats")
+        return None
+
+    address_from = order_data.get("address_from")
+    address_to = order_data.get("address_to")
+    if address_from:
+        populate_persuggest_for_address(order_data, address_from, "from")
+    if address_to:
+        populate_persuggest_for_address(order_data, address_to, "to")
+
+    payload = build_routestats_payload(order_data)
+    if not payload:
+        logger.warning("Не удалось собрать payload routestats: нет города или адресов")
+        return None
+
+    try:
+        response = perform_request(ROUTESTATS_URL, json=payload, timeout=10)
+        return response.json()
+    except Exception as exc:
+        logger.error(f"Не удалось получить routestats: {exc}")
+        return None
+
+
+def ensure_routestats_response(context: ContextTypes.DEFAULT_TYPE):
+    cached = context.user_data.get("routestats_response")
+    if cached:
+        return cached
+
+    order_data = context.user_data.get("order_data") or {}
+    response = fetch_routestats(order_data)
+    if response is not None:
+        context.user_data["routestats_response"] = response
+    return response
 
 
 def child_seat_type_keyboard():
@@ -1230,11 +1847,13 @@ async def topup_amount_entered(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def text_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault('order_data', {})['address_from'] = update.message.text
+    populate_persuggest_for_address(context.user_data.setdefault('order_data', {}), update.message.text, "from")
     await ask_address_to(update, context)
     return WAIT_ADDRESS_TO
 
 async def text_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault('order_data', {})['address_to'] = update.message.text
+    populate_persuggest_for_address(context.user_data.setdefault('order_data', {}), update.message.text, "to")
     await update.message.reply_text("Хотите добавить ещё один адрес?", reply_markup=yes_no_keyboard())
     return WAIT_ADDRESS_THIRD_DECISION
 
@@ -1260,6 +1879,7 @@ async def ask_tariff(update_or_query, context):
         target = update_or_query.message
     else:
         target = update_or_query.message
+    ensure_routestats_response(context)
     await target.reply_text("Выберите тариф 🚕", reply_markup=tariff_keyboard())
 
 
@@ -1292,11 +1912,13 @@ async def favorite_address_callback(update: Update, context: ContextTypes.DEFAUL
     data = context.user_data.setdefault('order_data', {})
     if stage == "from":
         data['address_from'] = fav['address']
+        populate_persuggest_for_address(data, fav['address'], "from")
         await query.message.reply_text(f"Адрес откуда выбран: {fav['address']}")
         await ask_address_to(query, context)
         return WAIT_ADDRESS_TO
     if stage == "to":
         data['address_to'] = fav['address']
+        populate_persuggest_for_address(data, fav['address'], "to")
         await query.message.reply_text(f"Адрес куда выбран: {fav['address']}")
         await query.message.reply_text("Хотите добавить ещё один адрес?", reply_markup=yes_no_keyboard())
         return WAIT_ADDRESS_THIRD_DECISION
@@ -1342,12 +1964,30 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             wishes=", ".join(data.get('wishes', [])) if data.get('wishes') else None,
             comment=comment,
         )
+        base_amount = data.get('base_amount')
+        offer = data.get('offer')
+        persuggest_fields = {
+            "address_from_log": data.get("address_from_log"),
+            "address_from_title": data.get("address_from_title"),
+            "address_from_position": data.get("address_from_position"),
+            "address_to_log": data.get("address_to_log"),
+            "address_to_title": data.get("address_to_title"),
+            "address_to_position": data.get("address_to_position"),
+        }
+        extra_fields = {
+            **{k: v for k, v in persuggest_fields.items() if v is not None},
+            **{k: v for k, v in {"base_amount": base_amount, "offer": offer}.items() if v is not None},
+        }
+        if extra_fields:
+            update_order_fields(order_id, **extra_fields)
 
     else:
         order_id = context.user_data.get('order_id')
         if not order_id:
             await update.message.reply_text("Произошла ошибка: заказ не найден.")
             return ConversationHandler.END
+        base_amount = data.get('base_amount')
+        offer = data.get('offer')
         update_order_fields(
             order_id,
             tariff=data.get('tariff'),
@@ -1355,28 +1995,50 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             child_seat_type=data.get('child_seat_type'),
             wishes=", ".join(data.get('wishes', [])) if data.get('wishes') else None,
             comment=comment,
+            **{k: v for k, v in {"base_amount": base_amount, "offer": offer}.items() if v is not None},
         )
 
+    populate_price_from_routestats(context)
     context.user_data['order_id'] = order_id
-    await send_order_preview(update.message, order_id)
+    await send_order_preview(update.message, order_id, context)
 
     return WAIT_CONFIRMATION
 
 
-async def send_order_preview(target, order_id: int):
+async def send_order_preview(target, order_id: int, context: ContextTypes.DEFAULT_TYPE | None = None):
+    if context:
+        order_data = context.user_data.get('order_data') or {}
+        if not (order_data.get('base_amount') or order_data.get('offer')):
+            populate_price_from_routestats(context, force=True)
+
     order = get_order(order_id)
     if not order:
         await target.reply_text("❌ Не удалось сформировать предварительный просмотр заказа.")
         return ConversationHandler.END
 
     cost_source = order.get("amount") or order.get("base_amount")
-    cost_text = f"{cost_source:.2f} ₽" if cost_source else "Будет рассчитана оператором"
+    if cost_source is None and context:
+        # Попробуем заново получить цену по выбранному тарифу
+        _, fresh_amount = populate_price_from_routestats(context, force=True)
+        if fresh_amount is not None:
+            cost_source = fresh_amount
+            update_order_fields(order_id, base_amount=fresh_amount)
+        else:
+            live_data = context.user_data.get('order_data') or {}
+            cost_source = live_data.get('amount') or live_data.get('base_amount')
+            if cost_source is not None:
+                update_order_fields(order_id, base_amount=cost_source)
+
+    parsed_cost = parse_price_value(cost_source)
+    cost_text = f"{parsed_cost:.2f} ₽" if parsed_cost is not None else "Будет рассчитана оператором"
 
     parts = [
         f"Предварительный просмотр заказа №{order_id}",
         f"Тариф: {order.get('tariff') or 'не выбран'}",
         f"Стоимость: {cost_text}",
     ]
+    if order.get("offer"):
+        parts.append(f"Оффер: {order.get('offer')}")
 
     if order.get("city"):
         parts.append(f"Город: {order.get('city')}")
@@ -1410,8 +2072,15 @@ async def send_order_preview(target, order_id: int):
 async def tariff_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    tariff = query.data.split("_", 1)[1]
-    context.user_data.setdefault('order_data', {})['tariff'] = tariff
+    raw_data = query.data.split("_", 1)[1]
+    tariff_class, _, explicit_title = raw_data.partition("|")
+    tariff_info = TARIFF_BY_CLASS.get(tariff_class, {})
+    tariff_title = explicit_title or tariff_info.get("title", tariff_class)
+
+    order_data = context.user_data.setdefault('order_data', {})
+    order_data['tariff'] = tariff_title
+    order_data['tariff_class'] = tariff_class
+    populate_price_from_routestats(context, force=True)
     await query.message.reply_text(
         "Выберите доп. опции по необходимости",
         reply_markup=additional_options_keyboard(context.user_data.get('order_data', {})),
@@ -1543,6 +2212,8 @@ async def notify_admins(context, order_id):
         parts.append(f"Доп. адрес: {order.get('address_extra')}")
     if order.get("tariff"):
         parts.append(f"Тариф: {order.get('tariff')}")
+    if order.get("offer"):
+        parts.append(f"Оффер: {order.get('offer')}")
     if order.get("child_seat"):
         parts.append(f"Детское кресло: {order.get('child_seat')}")
     if order.get("child_seat_type"):
