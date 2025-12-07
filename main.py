@@ -568,9 +568,9 @@ def save_replacement_to_secondary_db(info):
 
             col_token2 = pick_column("token2")
             col_external_id = pick_column("external_id", "trip_id", "id")
-            col_card = pick_column("card_x", "cardx")
+            col_card = pick_column("card_x", "cardx", "card")
             col_order = pick_column("order_number", "orderid", "order_id")
-            col_link = pick_column("link")
+            col_link = pick_column("link", "trip_link", "triplink")
             col_tg_id = pick_column("tg_id", "telegram_id", "user_id", "userid")
 
             if not all([col_token2, col_external_id, col_card, col_order, col_link]):
