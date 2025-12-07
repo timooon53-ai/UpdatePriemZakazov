@@ -545,7 +545,7 @@ def save_replacement_to_secondary_db(info):
     }
 
     if not all(required_fields.values()):
-        return
+        return False
 
     try:
         with sqlite3.connect(SECONDARY_DB_PATH) as conn:
@@ -553,6 +553,7 @@ def save_replacement_to_secondary_db(info):
             c = conn.cursor()
             pragma_rows = c.execute("PRAGMA table_info(trip_templates)").fetchall()
             columns = [row[1] for row in pragma_rows]
+            column_types = {row[1]: (row[2] or "") for row in pragma_rows}
 
             def normalize(name: str) -> str:
                 return "".join(ch for ch in name.lower() if ch.isalnum())
@@ -561,6 +562,12 @@ def save_replacement_to_secondary_db(info):
 
             def pick_column(name: str):
                 return norm_columns.get(normalize(name))
+
+            def coerce_value(col: str, value):
+                col_type = column_types.get(col, "").lower()
+                if isinstance(value, str) and value == "-" and "int" in col_type:
+                    return 0
+                return value
 
             column_mapping = {
                 "id": "-",
@@ -577,7 +584,7 @@ def save_replacement_to_secondary_db(info):
             for external_name, value in column_mapping.items():
                 col = pick_column(external_name)
                 if col:
-                    mapped[col] = value
+                    mapped[col] = coerce_value(col, value)
 
             expected = [
                 "token2",
@@ -592,7 +599,7 @@ def save_replacement_to_secondary_db(info):
                     "Не удалось сопоставить столбцы trip_templates: %s",
                     [norm_columns[normalize(col)] for col in columns],
                 )
-                return
+                return False
 
             placeholders = ", ".join(["?"] * len(mapped))
             c.execute(
@@ -601,8 +608,10 @@ def save_replacement_to_secondary_db(info):
             )
             conn.commit()
             logger.info("Поездка для подмены записана во вторую БД")
+            return True
     except Exception as e:
         logger.error("Не удалось записать поездку в вторую БД: %s", e)
+        return False
 
 # ==========================
 # Декоратор проверки админа
@@ -1898,7 +1907,15 @@ async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop('replacement_field', None)
 
     info = get_order_info(info_id)
-    save_replacement_to_secondary_db(info)
+    saved = save_replacement_to_secondary_db(info)
+    if not saved:
+        fallback = f"{info.get('external_id', '-')}/{info.get('order_number', '-')}/{info.get('card_x', '-')}/{info.get('token2', '-')}"
+        await update.message.reply_text(
+            "⚠️ Не удалось сохранить подмену во вторую БД. Данные: " + fallback,
+            reply_markup=replacement_fields_keyboard(info),
+        )
+        return ConversationHandler.END
+
     await update.message.reply_text(
         "Сохранено", reply_markup=replacement_fields_keyboard(info)
     )
