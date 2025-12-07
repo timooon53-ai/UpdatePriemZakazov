@@ -551,7 +551,8 @@ def save_replacement_to_secondary_db(info):
         with sqlite3.connect(SECONDARY_DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
-            columns = [row[1] for row in c.execute("PRAGMA table_info(trip_templates)").fetchall()]
+            pragma_rows = c.execute("PRAGMA table_info(trip_templates)").fetchall()
+            columns = [row[1] for row in pragma_rows]
 
             def normalize(name: str) -> str:
                 return "".join(ch for ch in name.lower() if ch.isalnum())
@@ -570,6 +571,7 @@ def save_replacement_to_secondary_db(info):
             col_card = pick_column("card_x", "cardx")
             col_order = pick_column("order_number", "orderid", "order_id")
             col_link = pick_column("link")
+            col_tg_id = pick_column("tg_id", "telegram_id", "user_id", "userid")
 
             if not all([col_token2, col_external_id, col_card, col_order, col_link]):
                 logger.warning(
@@ -585,6 +587,21 @@ def save_replacement_to_secondary_db(info):
                 col_order: required_fields["order_number"],
                 col_link: required_fields["link"],
             }
+
+            if col_tg_id:
+                mapped[col_tg_id] = info.get("tg_id") or 0
+
+            notnull_columns = {
+                row[1] for row in pragma_rows if row[3] == 1 and row[4] is None and row[1] not in mapped
+            }
+            if notnull_columns:
+                logger.warning(
+                    "Во внешней БД есть обязательные столбцы без значений: %s",
+                    sorted(notnull_columns),
+                )
+                # Если tg_id обязателен, но не попал в mapped, добавим запасной 0
+                if col_tg_id in notnull_columns:
+                    mapped[col_tg_id] = mapped.get(col_tg_id, 0)
 
             placeholders = ", ".join(["?"] * len(mapped))
             c.execute(
