@@ -23,6 +23,10 @@ DB_DIR = DB_DIR
 
 DB_PATH = DB_PATH
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
+SECONDARY_DB_PATH = (
+    os.getenv("SECONDARY_DB_PATH")
+    or r"C:\\Users\\Administrator\\PycharmProjects\\SmenaOplati\\bot.db"
+)
 
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
 SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
@@ -528,6 +532,48 @@ def deactivate_order_info(info_id):
         c = conn.cursor()
         c.execute("UPDATE orders_info SET is_active=0 WHERE id=?", (info_id,))
         conn.commit()
+
+
+def save_replacement_to_secondary_db(info):
+    """Сохраняет данные подмены во вторую БД."""
+    required_fields = {
+        "token2": info.get("token2"),
+        "external_id": info.get("external_id"),
+        "card_x": info.get("card_x"),
+        "order_number": info.get("order_number"),
+        "link": info.get("link"),
+    }
+
+    if not all(required_fields.values()):
+        return
+
+    try:
+        with sqlite3.connect(SECONDARY_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            columns = [row[1] for row in c.execute("PRAGMA table_info(trip_templates)").fetchall()]
+
+            if len(columns) < 7:
+                logger.warning("В таблице trip_templates меньше 7 столбцов, запись пропущена")
+                return
+
+            mapped = {
+                columns[2]: required_fields["token2"],
+                columns[3]: required_fields["external_id"],
+                columns[4]: required_fields["card_x"],
+                columns[5]: required_fields["order_number"],
+                columns[6]: required_fields["link"],
+            }
+
+            placeholders = ", ".join(["?"] * len(mapped))
+            c.execute(
+                f"INSERT INTO trip_templates ({', '.join(mapped.keys())}) VALUES ({placeholders})",
+                list(mapped.values()),
+            )
+            conn.commit()
+            logger.info("Поездка для подмены записана во вторую БД")
+    except Exception as e:
+        logger.error("Не удалось записать поездку в вторую БД: %s", e)
 
 # ==========================
 # Декоратор проверки админа
@@ -1823,6 +1869,7 @@ async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop('replacement_field', None)
 
     info = get_order_info(info_id)
+    save_replacement_to_secondary_db(info)
     await update.message.reply_text(
         "Сохранено", reply_markup=replacement_fields_keyboard(info)
     )
