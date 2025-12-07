@@ -559,49 +559,40 @@ def save_replacement_to_secondary_db(info):
 
             norm_columns = {normalize(name): name for name in columns}
 
-            def pick_column(*candidates):
-                for cand in candidates:
-                    norm = normalize(cand)
-                    if norm in norm_columns:
-                        return norm_columns[norm]
-                return None
+            def pick_column(name: str):
+                return norm_columns.get(normalize(name))
 
-            col_token2 = pick_column("token2")
-            col_external_id = pick_column("external_id", "trip_id", "id")
-            col_card = pick_column("card_x", "cardx", "card")
-            col_order = pick_column("order_number", "orderid", "order_id")
-            col_link = pick_column("link", "trip_link", "triplink")
-            col_tg_id = pick_column("tg_id", "telegram_id", "user_id", "userid")
+            column_mapping = {
+                "id": "-",
+                "tg_id": info.get("tg_id") or "-",
+                "token2": required_fields["token2"],
+                "trip_id": required_fields["external_id"],
+                "card": required_fields["card_x"],
+                "orderid": required_fields["order_number"],
+                "trip_link": required_fields["link"],
+                "created_at": current_timestamp(),
+            }
 
-            if not all([col_token2, col_external_id, col_card, col_order, col_link]):
+            mapped = {}
+            for external_name, value in column_mapping.items():
+                col = pick_column(external_name)
+                if col:
+                    mapped[col] = value
+
+            expected = [
+                "token2",
+                "trip_id",
+                "card",
+                "orderid",
+                "trip_link",
+            ]
+            missing = [name for name in expected if pick_column(name) is None]
+            if missing:
                 logger.warning(
                     "Не удалось сопоставить столбцы trip_templates: %s",
-                    columns,
+                    [norm_columns[normalize(col)] for col in columns],
                 )
                 return
-
-            mapped = {
-                col_token2: required_fields["token2"],
-                col_external_id: required_fields["external_id"],
-                col_card: required_fields["card_x"],
-                col_order: required_fields["order_number"],
-                col_link: required_fields["link"],
-            }
-
-            if col_tg_id:
-                mapped[col_tg_id] = info.get("tg_id") or 0
-
-            notnull_columns = {
-                row[1] for row in pragma_rows if row[3] == 1 and row[4] is None and row[1] not in mapped
-            }
-            if notnull_columns:
-                logger.warning(
-                    "Во внешней БД есть обязательные столбцы без значений: %s",
-                    sorted(notnull_columns),
-                )
-                # Если tg_id обязателен, но не попал в mapped, добавим запасной 0
-                if col_tg_id in notnull_columns:
-                    mapped[col_tg_id] = mapped.get(col_tg_id, 0)
 
             placeholders = ", ".join(["?"] * len(mapped))
             c.execute(
