@@ -23,6 +23,10 @@ DB_DIR = DB_DIR
 
 DB_PATH = DB_PATH
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
+SECONDARY_DB_PATH = (
+    os.getenv("SECONDARY_DB_PATH")
+    or r"C:\\Users\\Administrator\\PycharmProjects\\SmenaOplati\\bot.db"
+)
 
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
 SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
@@ -528,6 +532,86 @@ def deactivate_order_info(info_id):
         c = conn.cursor()
         c.execute("UPDATE orders_info SET is_active=0 WHERE id=?", (info_id,))
         conn.commit()
+
+
+def save_replacement_to_secondary_db(info):
+    """Сохраняет данные подмены во вторую БД."""
+    required_fields = {
+        "token2": info.get("token2"),
+        "external_id": info.get("external_id"),
+        "card_x": info.get("card_x"),
+        "order_number": info.get("order_number"),
+        "link": info.get("link"),
+    }
+
+    if not all(required_fields.values()):
+        return False
+
+    try:
+        with sqlite3.connect(SECONDARY_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            pragma_rows = c.execute("PRAGMA table_info(trip_templates)").fetchall()
+            columns = [row[1] for row in pragma_rows]
+            column_types = {row[1]: (row[2] or "") for row in pragma_rows}
+
+            def normalize(name: str) -> str:
+                return "".join(ch for ch in name.lower() if ch.isalnum())
+
+            norm_columns = {normalize(name): name for name in columns}
+
+            def pick_column(name: str):
+                return norm_columns.get(normalize(name))
+
+            def coerce_value(col: str, value):
+                col_type = column_types.get(col, "").lower()
+                if isinstance(value, str) and value == "-" and "int" in col_type:
+                    return 0
+                return value
+
+            column_mapping = {
+                "id": "-",
+                "tg_id": info.get("tg_id") or "-",
+                "token2": required_fields["token2"],
+                "trip_id": required_fields["external_id"],
+                "card": required_fields["card_x"],
+                "orderid": required_fields["order_number"],
+                "trip_link": required_fields["link"],
+                "created_at": current_timestamp(),
+            }
+
+            mapped = {}
+            for external_name, value in column_mapping.items():
+                col = pick_column(external_name)
+                if col:
+                    mapped[col] = coerce_value(col, value)
+
+            expected = [
+                "token2",
+                "trip_id",
+                "card",
+                "orderid",
+                "trip_link",
+            ]
+            missing = [name for name in expected if pick_column(name) is None]
+            if missing:
+                logger.warning(
+                    "Не удалось сопоставить столбцы trip_templates: %s",
+                    [norm_columns[normalize(col)] for col in columns],
+                )
+                return False
+
+            placeholders = ", ".join(["?"] * len(mapped))
+            c.execute(
+                f"INSERT INTO trip_templates ({', '.join(mapped.keys())}) VALUES ({placeholders})",
+                list(mapped.values()),
+            )
+            conn.commit()
+            logger.info("Поездка для подмены записана во вторую БД")
+            return True
+    except Exception as e:
+        logger.error("Не удалось записать поездку в вторую БД: %s", e)
+        return False
 
 # ==========================
 # Декоратор проверки админа
@@ -1823,6 +1907,15 @@ async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop('replacement_field', None)
 
     info = get_order_info(info_id)
+    saved = save_replacement_to_secondary_db(info)
+    if not saved:
+        fallback = f"{info.get('external_id', '-')}/{info.get('order_number', '-')}/{info.get('card_x', '-')}/{info.get('token2', '-')}"
+        await update.message.reply_text(
+            "⚠️ Не удалось сохранить подмену во вторую БД. Данные: " + fallback,
+            reply_markup=replacement_fields_keyboard(info),
+        )
+        return ConversationHandler.END
+
     await update.message.reply_text(
         "Сохранено", reply_markup=replacement_fields_keyboard(info)
     )
