@@ -553,16 +553,37 @@ def save_replacement_to_secondary_db(info):
             c = conn.cursor()
             columns = [row[1] for row in c.execute("PRAGMA table_info(trip_templates)").fetchall()]
 
-            if len(columns) < 7:
-                logger.warning("В таблице trip_templates меньше 7 столбцов, запись пропущена")
+            def normalize(name: str) -> str:
+                return "".join(ch for ch in name.lower() if ch.isalnum())
+
+            norm_columns = {normalize(name): name for name in columns}
+
+            def pick_column(*candidates):
+                for cand in candidates:
+                    norm = normalize(cand)
+                    if norm in norm_columns:
+                        return norm_columns[norm]
+                return None
+
+            col_token2 = pick_column("token2")
+            col_external_id = pick_column("external_id", "trip_id", "id")
+            col_card = pick_column("card_x", "cardx")
+            col_order = pick_column("order_number", "orderid", "order_id")
+            col_link = pick_column("link")
+
+            if not all([col_token2, col_external_id, col_card, col_order, col_link]):
+                logger.warning(
+                    "Не удалось сопоставить столбцы trip_templates: %s",
+                    columns,
+                )
                 return
 
             mapped = {
-                columns[2]: required_fields["token2"],
-                columns[3]: required_fields["external_id"],
-                columns[4]: required_fields["card_x"],
-                columns[5]: required_fields["order_number"],
-                columns[6]: required_fields["link"],
+                col_token2: required_fields["token2"],
+                col_external_id: required_fields["external_id"],
+                col_card: required_fields["card_x"],
+                col_order: required_fields["order_number"],
+                col_link: required_fields["link"],
             }
 
             placeholders = ", ".join(["?"] * len(mapped))
