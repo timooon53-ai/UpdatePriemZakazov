@@ -4,29 +4,36 @@ import sqlite3
 import logging
 import requests
 import random
+import time
 from datetime import datetime
 from functools import wraps
 
+
+REQUIRED_CHANNEL = "-1003460665929"
+
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton
+    ReplyKeyboardMarkup, KeyboardButton, Bot
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler, ConversationHandler
 )
 
-TOKEN = TOKEN
+TOKEN = os.getenv("BOT_TOKEN") or TOKEN
+PRIMARY_BOT_TOKEN = locals().get("PRIMARY_BOT_TOKEN") or os.getenv("PRIMARY_BOT_TOKEN") or TOKEN
 ADMIN_IDS = ADMIN_IDS
 SCREENSHOTS_DIR = SCREENSHOTS_DIR
 DB_DIR = DB_DIR
 
-DB_PATH = DB_PATH
+DB_PATH = os.getenv("DB_PATH") or DB_PATH
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
 SECONDARY_DB_PATH = (
     os.getenv("SECONDARY_DB_PATH")
     or r"C:\\Users\\Administrator\\PycharmProjects\\SmenaOplati\\bot.db"
 )
+
+CURRENT_BOT_TOKEN = TOKEN
 
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
 SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
@@ -57,6 +64,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+primary_bot = Bot(token=PRIMARY_BOT_TOKEN)
+
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(DB_DIR, exist_ok=True)
 
@@ -64,11 +73,17 @@ os.makedirs(DB_DIR, exist_ok=True)
 def current_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+
+def required_channel_link() -> str:
+    if REQUIRED_CHANNEL.startswith("-100") and REQUIRED_CHANNEL[4:].isdigit():
+        return f"https://t.me/c/{REQUIRED_CHANNEL[4:]}"
+    return f"https://t.me/{REQUIRED_CHANNEL.lstrip('@')}"
+
 # ==========================
 # Инициализация БД
 # ==========================
-def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
+def init_db(db_path=DB_PATH):
+    with sqlite3.connect(db_path) as conn:
         c = conn.cursor()
         c.execute("""
             CREATE TABLE IF NOT EXISTS banned (
@@ -95,6 +110,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tg_id INTEGER,
+                bot_token TEXT,
                 type TEXT,
                 screenshot_path TEXT,
                 city TEXT,
@@ -122,6 +138,7 @@ def init_db():
             "child_seat_type": "TEXT",
             "wishes": "TEXT",
             "base_amount": "REAL",
+            "bot_token": "TEXT",
         }
         for column, definition in new_columns.items():
             if column not in existing_columns:
@@ -203,19 +220,36 @@ def init_db():
             if column not in payment_columns:
                 c.execute(f"ALTER TABLE payments ADD COLUMN {column} {definition}")
 
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_bots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER,
+                token TEXT UNIQUE,
+                db_path TEXT,
+                title TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        bot_columns = {row[1] for row in c.execute("PRAGMA table_info(user_bots)").fetchall()}
+        if "title" not in bot_columns:
+            c.execute("ALTER TABLE user_bots ADD COLUMN title TEXT")
+
         conn.commit()
 
 
-def get_setting(key, default=None):
-    with sqlite3.connect(DB_PATH) as conn:
+def get_setting(key, default=None, db_path=DB_PATH):
+    with sqlite3.connect(db_path) as conn:
         c = conn.cursor()
         c.execute("SELECT value FROM settings WHERE key=?", (key,))
         row = c.fetchone()
         return row[0] if row else default
 
 
-def set_setting(key, value):
-    with sqlite3.connect(DB_PATH) as conn:
+def set_setting(key, value, db_path=DB_PATH):
+    with sqlite3.connect(db_path) as conn:
         c = conn.cursor()
         c.execute(
             "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -250,18 +284,6 @@ def get_user(tg_id):
         c.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,))
         row = c.fetchone()
         return dict(row) if row else None
-
-def update_balance(tg_id, amount):
-    with sqlite3.connect(USERS_DB) as conn:
-        c = conn.cursor()
-        c.execute("UPDATE users SET balance = balance + ? WHERE tg_id=?", (amount, tg_id))
-        conn.commit()
-
-def set_balance(tg_id, value):
-    with sqlite3.connect(USERS_DB) as conn:
-        c = conn.cursor()
-        c.execute("UPDATE users SET balance = ? WHERE tg_id=?", (value, tg_id))
-        conn.commit()
 
 def increment_orders_count(tg_id):
     with sqlite3.connect(USERS_DB) as conn:
@@ -314,11 +336,67 @@ def get_all_user_ids():
         return [row[0] for row in c.fetchall()]
 
 
+def add_user_bot(owner_id: int, token: str, db_path: str, title: str | None = None):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT OR REPLACE INTO user_bots (owner_id, token, db_path, title)
+            VALUES (?, ?, ?, ?)
+            """,
+            (owner_id, token, db_path, title),
+        )
+        conn.commit()
+
+
+def list_user_bots(owner_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM user_bots WHERE owner_id=? ORDER BY created_at DESC", (owner_id,))
+        return [dict(row) for row in c.fetchall()]
+
+
+def delete_user_bot(bot_id: int, owner_id: int):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM user_bots WHERE id=? AND owner_id=?", (bot_id, owner_id))
+        conn.commit()
+
+
+def get_bot_by_token(token: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM user_bots WHERE token=?", (token,))
+        row = c.fetchone()
+        return dict(row) if row else None
+
+
+def create_bot_storage(token: str, owner_id: int, title: str | None = None):
+    folder = os.path.join(DB_DIR, "user_bots", f"bot_{int(time.time())}")
+    os.makedirs(folder, exist_ok=True)
+    db_path = os.path.join(folder, "bot.db")
+    init_db(db_path)
+    set_setting("bot_owner", str(owner_id), db_path=db_path)
+    set_setting("bot_token", token, db_path=db_path)
+    add_user_bot(owner_id, token, db_path, title)
+    return db_path
+
+
+def get_bot_owner_from_settings():
+    value = get_setting("bot_owner")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def create_payment(
     tg_id,
     method,
     amount,
-    type_="topup",
+    type_="order",
     order_id=None,
     currency="RUB",
     comment_code=None,
@@ -401,6 +479,7 @@ def get_latest_user_order(tg_id):
 # ==========================
 def create_order(
     tg_id,
+    bot_token=None,
     type_,
     screenshot_path=None,
     city=None,
@@ -418,13 +497,14 @@ def create_order(
         c.execute(
             """
             INSERT INTO orders (
-                tg_id, type, screenshot_path, city, address_from, address_to, address_extra,
+                tg_id, bot_token, type, screenshot_path, city, address_from, address_to, address_extra,
                 tariff, child_seat, child_seat_type, wishes, comment
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 tg_id,
+                bot_token or CURRENT_BOT_TOKEN,
                 type_,
                 screenshot_path,
                 city,
@@ -626,6 +706,30 @@ def admin_only(func):
         return await func(update, context)
     return wrapper
 
+
+async def ensure_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not REQUIRED_CHANNEL:
+        return True
+    user = update.effective_user
+    if not user:
+        return False
+    try:
+        member = await context.bot.get_chat_member(REQUIRED_CHANNEL, user.id)
+        if member.status in {"left", "kicked"}:
+            raise ValueError("not subscribed")
+    except Exception:
+        button = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("✅ Подписаться", url=required_channel_link())]]
+        )
+        target = update.effective_message or (update.callback_query and update.callback_query.message)
+        if target:
+            await target.reply_text(
+                "Для использования бота подпишитесь на наш канал и вернитесь сюда.",
+                reply_markup=button,
+            )
+        return False
+    return True
+
 # ==========================
 # Клавиатуры
 # ==========================
@@ -652,7 +756,7 @@ def profile_keyboard(has_city: bool, has_favorites: bool):
 
     fav_row = [InlineKeyboardButton("⭐ Любимые адреса", callback_data="profile_fav_manage")]
     buttons.append(fav_row)
-    buttons.append([InlineKeyboardButton("💳 Пополнить баланс", callback_data="profile_topup")])
+    buttons.append([InlineKeyboardButton("🤖 Добавить своего бота", callback_data="profile_bots")])
     buttons.append([InlineKeyboardButton("🔙 В главное меню", callback_data="profile_back")])
     return InlineKeyboardMarkup(buttons)
 
@@ -675,6 +779,19 @@ def favorites_select_keyboard(favorites, stage):
     for fav in favorites:
         buttons.append([InlineKeyboardButton(fav['address'], callback_data=f"fav_{stage}_{fav['id']}")])
     buttons.append([InlineKeyboardButton("📝 Ввести новый", callback_data=f"fav_{stage}_manual")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def bots_manage_keyboard(bots):
+    buttons = []
+    for bot in bots:
+        label = bot.get("title") or bot.get("token", "")
+        label = label or "Без названия"
+        buttons.append([
+            InlineKeyboardButton(f"🗑️ Удалить {label}", callback_data=f"profile_bot_delete_{bot['id']}")
+        ])
+    buttons.append([InlineKeyboardButton("➕ Добавить бота", callback_data="profile_bot_add")])
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="profile_back")])
     return InlineKeyboardMarkup(buttons)
 
 def order_type_keyboard():
@@ -816,8 +933,7 @@ def admin_search_buttons(order_id):
 
 def payment_choice_keyboard(order_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Карта", callback_data=f"pay_card_{order_id}")],
-        [InlineKeyboardButton("💰 Баланс", callback_data=f"pay_balance_{order_id}")],
+        [InlineKeyboardButton("💳 Отправить способы оплаты", callback_data=f"pay_card_{order_id}")],
     ])
 
 
@@ -826,7 +942,6 @@ def admin_panel_keyboard():
     ordering_label = "⏹️ Остановить приём заказов" if ordering_enabled else "▶️ Включить приём заказов"
     status_text = "✅ Заказы включены" if ordering_enabled else "🚧 Заказы выключены"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Баланс пользователя", callback_data="admin_balance")],
         [InlineKeyboardButton("📦 Заказы пользователя", callback_data="admin_orders")],
         [InlineKeyboardButton("🔁 Обновить информацию", callback_data="admin_refresh")],
         [InlineKeyboardButton("📢 Рассылка по всем", callback_data="admin_broadcast")],
@@ -852,6 +967,8 @@ def not_banned(func):
             if c.fetchone():
                 await update.message.reply_text("❌ Вы заблокированы и не можете использовать бота.")
                 return
+        if not await ensure_subscription(update, context):
+            return
         return await func(update, context)
     return wrapper
 
@@ -881,10 +998,10 @@ async def send_profile_info(target, user_id, context):
     context.user_data.pop("fav_edit_id", None)
 
     username = user["username"]
-    balance = user["balance"]
     orders_count = user["orders_count"]
     coefficient = user["coefficient"]
     city = user["city"]
+    user_bots = list_user_bots(user_id)
 
     favorites = get_favorite_addresses(user_id)
     favorites_text = "\n".join([f"{idx + 1}. {fav['address']}" for idx, fav in enumerate(favorites)]) or "—"
@@ -893,10 +1010,10 @@ async def send_profile_info(target, user_id, context):
         f"👤 Профиль\n"
         f"Username: @{username or 'не указан'}\n"
         f"Telegram ID: {user_id}\n"
-        f"Баланс: {balance:.2f} ₽\n"
         f"Заказано поездок: {orders_count}\n"
         f"Коэффициент: {coefficient:.2f}\n"
         f"Город: {city or 'не указан'}\n"
+        f"Подключённых ботов: {len(user_bots)}\n"
         f"Любимые адреса:\n{favorites_text}"
     )
     await target.reply_text(
@@ -916,8 +1033,7 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. Для заказа такси нажмите «Заказать такси 🚖».\n"
         "2. Вы можете отправить заказ скриншотом или текстом.\n"
         "3. Статус заказа отслеживается через уведомления.\n"
-        "4. Баланс пополняется через администратора.\n"
-        "5. При проблемах — пишите @MikeWazovsk1y"
+        "4. При проблемах — пишите @MikeWazovsk1y"
     )
     await update.message.reply_text(text, reply_markup=back_keyboard())
 
@@ -960,7 +1076,7 @@ def payment_requisites(method: str):
     return mapping.get(method, "Реквизиты уточните у оператора")
 
 
-async def build_and_send_payment(user_id: int, method: str, amount: float | None, context: ContextTypes.DEFAULT_TYPE, target, type_="topup", order_id=None):
+async def build_and_send_payment(user_id: int, method: str, amount: float | None, context: ContextTypes.DEFAULT_TYPE, target, type_="order", order_id=None):
     comment_code = None if method in {"ltc", "usdt_trc20", "usdt_trx"} else generate_comment()
     raw_requisites = payment_requisites(method)
     display_requisites = raw_requisites
@@ -1022,15 +1138,13 @@ async def build_and_send_payment(user_id: int, method: str, amount: float | None
         parts.append(rate_text)
     if comment_code:
         parts.append(f"Комментарий к переводу: {format_mono(comment_code)}")
-    if type_ == "topup":
-        parts.append("После оплаты нажмите кнопку ниже.")
-    else:
-        parts.append("После оплаты сообщите об оплате ниже, мы проверим и подтвердим заказ.")
+    parts.append("После оплаты сообщите об оплате ниже, мы проверим и подтвердим заказ.")
 
-    buttons = [[InlineKeyboardButton("✅ Оплатил", callback_data=f"payment_paid_{payment_id}")]]
-    if type_ != "topup":
-        buttons.append([InlineKeyboardButton("🔍 Проверить оплату", callback_data=f"payment_check_{payment_id}")])
-    buttons.append([InlineKeyboardButton("❌ Отменить", callback_data=f"payment_cancel_{payment_id}")])
+    buttons = [
+        [InlineKeyboardButton("✅ Оплатил", callback_data=f"payment_paid_{payment_id}")],
+        [InlineKeyboardButton("🔍 Проверить оплату", callback_data=f"payment_check_{payment_id}")],
+        [InlineKeyboardButton("❌ Отменить", callback_data=f"payment_cancel_{payment_id}")],
+    ]
     keyboard = InlineKeyboardMarkup(buttons)
     await target.reply_text("\n".join(parts), reply_markup=keyboard, parse_mode="HTML")
     return payment_id
@@ -1039,6 +1153,8 @@ async def build_and_send_payment(user_id: int, method: str, amount: float | None
 async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not await ensure_subscription(update, context):
+        return ConversationHandler.END
     data = query.data
     user_id = query.from_user.id
 
@@ -1082,38 +1198,27 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif data == "profile_fav_back":
         await send_profile_info(query.message, user_id, context)
-    elif data == "profile_topup":
+    elif data == "profile_bots":
+        bots = list_user_bots(user_id)
+        if bots:
+            await query.message.reply_text(
+                "🤖 Ваши боты", reply_markup=bots_manage_keyboard(bots)
+            )
+        else:
+            await query.message.reply_text(
+                "У вас пока нет подключённых ботов. Добавьте нового по токену.",
+                reply_markup=bots_manage_keyboard([]),
+            )
+    elif data == "profile_bot_add":
+        context.user_data["awaiting_bot_token"] = True
+        await query.message.reply_text("Пришлите токен вашего бота, чтобы подключить его")
+    elif data.startswith("profile_bot_delete_"):
+        bot_id = int(data.rsplit("_", 1)[1])
+        delete_user_bot(bot_id, user_id)
+        bots = list_user_bots(user_id)
         await query.message.reply_text(
-            "💳 Выберите способ пополнения", reply_markup=payment_methods_keyboard("topup_")
+            "Бот отключён.", reply_markup=bots_manage_keyboard(bots)
         )
-
-
-async def topup_method_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    method = data.split("_", 1)[1]
-    user = get_user(query.from_user.id)
-    if not user:
-        await query.message.reply_text("Пользователь не найден")
-        return ConversationHandler.END
-
-    balance = user.get("balance", 0)
-    if balance < 0:
-        amount = abs(balance)
-        await query.message.reply_text(
-            f"Ваш баланс отрицательный ({balance:.2f} ₽). Сумма к оплате: {amount:.2f} ₽"
-        )
-        await build_and_send_payment(query.from_user.id, method, amount, context, query.message)
-        return ConversationHandler.END
-
-    if method in {"ltc", "usdt_trc20", "usdt_trx"}:
-        await build_and_send_payment(query.from_user.id, method, None, context, query.message)
-        return ConversationHandler.END
-
-    context.user_data["topup_method"] = method
-    await query.message.reply_text("Введите сумму пополнения (от 100 ₽):")
-    return WAIT_TOPUP_AMOUNT
 
 
 async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1153,14 +1258,10 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_REPLACEMENT_FIELD,
     WAIT_ADMIN_MESSAGE,
     WAIT_ADMIN_SUM,
-    WAIT_ADMIN_BALANCE,
-    WAIT_ADMIN_BALANCE_UPDATE,
     WAIT_ADMIN_ORDERS,
     WAIT_ADMIN_BROADCAST,
-    WAIT_TOPUP_AMOUNT,
     WAIT_PAYMENT_PROOF,
-    WAIT_ADMIN_TOPUP_AMOUNT,
-) = range(20)
+) = range(16)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -1176,6 +1277,8 @@ async def order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if not await ensure_subscription(update, context):
+        return ConversationHandler.END
     if not is_ordering_enabled():
         await query.message.reply_text(
             "⚙️ Заказ такси временно недоступен. Бот на технических работах, попробуйте позже.",
@@ -1266,24 +1369,6 @@ async def text_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_user_city(update.effective_user.id, city)
     await ask_address_from(update, context)
     return WAIT_ADDRESS_FROM
-
-
-async def topup_amount_entered(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        amount = float(update.message.text.replace(",", "."))
-    except ValueError:
-        await update.message.reply_text("Введите число в рублях")
-        return WAIT_TOPUP_AMOUNT
-    if amount < 100:
-        await update.message.reply_text("Минимальная сумма 100 ₽")
-        return WAIT_TOPUP_AMOUNT
-    method = context.user_data.get("topup_method")
-    if not method:
-        await update.message.reply_text("Способ пополнения не выбран")
-        return ConversationHandler.END
-    await build_and_send_payment(update.effective_user.id, method, amount, context, update.message)
-    context.user_data.pop("topup_method", None)
-    return ConversationHandler.END
 
 async def text_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault('order_data', {})['address_from'] = update.message.text
@@ -1537,9 +1622,9 @@ async def notify_admins(context, order_id):
         try:
             if order.get("screenshot_path"):
                 with open(order.get("screenshot_path"), "rb") as photo:
-                    await context.bot.send_photo(admin_id, photo=photo, caption=text, reply_markup=admin_order_buttons(order_id))
+                    await primary_bot.send_photo(admin_id, photo=photo, caption=text, reply_markup=admin_order_buttons(order_id))
             else:
-                await context.bot.send_message(admin_id, text, reply_markup=admin_order_buttons(order_id))
+                await primary_bot.send_message(admin_id, text, reply_markup=admin_order_buttons(order_id))
         except Exception as e:
             logger.error(f"Ошибка уведомления админа {admin_id}: {e}")
 
@@ -1607,7 +1692,7 @@ async def notify_admins_payment(context: ContextTypes.DEFAULT_TYPE, payment_id: 
     parts = [
         "📥 Новая оплата",
         f"Пользователь: @{user.get('username') or 'не указан'} (ID: {payment.get('tg_id')})",
-        f"Тип: {'Пополнение баланса' if payment.get('type') == 'topup' else 'Оплата заказа'}",
+        "Тип: Оплата заказа",
         f"Метод: {method_titles.get(method, method)}",
         f"Сумма: {amount_text} {display_currency if amount_value is not None else ''}",
         f"Реквизиты: {payment.get('requisites')}",
@@ -1627,7 +1712,7 @@ async def notify_admins_payment(context: ContextTypes.DEFAULT_TYPE, payment_id: 
     )
     for admin_id in ADMIN_IDS:
         try:
-            await context.bot.send_message(admin_id, "\n".join(parts), reply_markup=keyboard)
+            await primary_bot.send_message(admin_id, "\n".join(parts), reply_markup=keyboard)
         except Exception as e:
             logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
@@ -1727,17 +1812,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=payment_methods_keyboard("orderpay_", order_id),
         )
         await query.message.reply_text("Меню оплаты отправлено клиенту")
-    elif data.startswith("pay_balance_"):
-        order_id = int(data.split("_")[2])
-        order = get_order(order_id)
-        if not order:
-            await query.answer("Заказ не найден", show_alert=True)
-            return ConversationHandler.END
-        total = order.get("amount") or 0
-        tg_id = order.get("tg_id")
-        update_balance(tg_id, total)
-        await context.bot.send_message(tg_id, f"💰 На ваш баланс начислено {total:.2f} ₽ за заказ №{order_id}")
-        await query.message.reply_text("Баланс пользователя пополнен ✅")
     elif data.startswith("replacement_offer_add_"):
         order_id = int(data.rsplit("_", 1)[1])
         info_id = create_order_info(order_id)
@@ -1800,9 +1874,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             "Заказ для подмены завершён и убран из списка.", reply_markup=admin_panel_keyboard()
         )
-    elif data == "admin_balance":
-        await query.message.reply_text("Введите Telegram ID пользователя для просмотра баланса:")
-        return WAIT_ADMIN_BALANCE
     elif data == "admin_orders":
         await query.message.reply_text("Введите Telegram ID пользователя для просмотра его заказов:")
         return WAIT_ADMIN_ORDERS
@@ -1827,26 +1898,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Платёж не найден")
             return ConversationHandler.END
         user_id = payment.get("tg_id")
-        method = payment.get("method")
-        if payment.get("type") == "order":
-            order_id = payment.get("order_id")
-            if order_id:
-                update_order_status(order_id, "paid")
-            update_payment(payment_id, status="success")
-            await context.bot.send_message(user_id, "✅ Оплата за поездку подтверждена! Спасибо!")
-            await query.message.reply_text("Оплата отмечена как успешная")
-            return ConversationHandler.END
-
-        if method in {"ltc", "usdt_trc20", "usdt_trx"}:
-            context.user_data['admin_topup_payment'] = payment_id
-            await query.message.reply_text("Введите сумму для зачисления на баланс:")
-            return WAIT_ADMIN_TOPUP_AMOUNT
-
-        amount = payment.get("amount") or 0
-        update_balance(user_id, amount)
+        order_id = payment.get("order_id")
+        if order_id:
+            update_order_status(order_id, "paid")
         update_payment(payment_id, status="success")
-        await context.bot.send_message(user_id, f"💰 Баланс пополнен на {amount:.2f} ₽")
-        await query.message.reply_text("Баланс пополнен")
+        await context.bot.send_message(user_id, "✅ Оплата за поездку подтверждена! Спасибо!")
+        await query.message.reply_text("Оплата отмечена как успешная")
+        return ConversationHandler.END
     elif data.startswith("paydecline_"):
         payment_id = int(data.rsplit("_", 1)[1])
         payment = get_payment(payment_id)
@@ -1919,78 +1977,6 @@ async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text(
         "Сохранено", reply_markup=replacement_fields_keyboard(info)
     )
-    return ConversationHandler.END
-
-
-async def admin_balance_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        target_id = int(update.message.text.strip())
-    except ValueError:
-        await update.message.reply_text("❌ Введите числовой Telegram ID")
-        return WAIT_ADMIN_BALANCE
-
-    user = get_user(target_id)
-    if not user:
-        await update.message.reply_text("Пользователь не найден", reply_markup=admin_panel_keyboard())
-        return ConversationHandler.END
-
-    text = (
-        f"👤 Пользователь: @{user.get('username') or 'не указан'}\n"
-        f"ID: {target_id}\n"
-        f"Баланс: {user.get('balance', 0):.2f} ₽\n"
-        f"Коэффициент: {user.get('coefficient', 1):.2f}"
-    )
-    context.user_data['balance_edit_id'] = target_id
-    await update.message.reply_text(
-        text + "\n\nВведите новый баланс (можно использовать дробный формат).",
-        reply_markup=admin_panel_keyboard(),
-    )
-    return WAIT_ADMIN_BALANCE_UPDATE
-
-
-async def admin_balance_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    target_id = context.user_data.get('balance_edit_id')
-    if not target_id:
-        await update.message.reply_text("❌ Пользователь не выбран", reply_markup=admin_panel_keyboard())
-        return ConversationHandler.END
-
-    text = update.message.text.replace(" ", "").replace(",", ".")
-    try:
-        new_balance = float(text)
-    except ValueError:
-        await update.message.reply_text("❌ Некорректное число, введите баланс заново")
-        return WAIT_ADMIN_BALANCE_UPDATE
-
-    set_balance(target_id, new_balance)
-    user = get_user(target_id)
-    context.user_data.pop('balance_edit_id', None)
-
-    await update.message.reply_text(
-        f"✅ Баланс пользователя @{user.get('username') or 'не указан'} обновлён: {new_balance:.2f} ₽",
-        reply_markup=admin_panel_keyboard(),
-    )
-    return ConversationHandler.END
-
-
-async def admin_topup_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    payment_id = context.user_data.get('admin_topup_payment')
-    if not payment_id:
-        await update.message.reply_text("Платёж не выбран")
-        return ConversationHandler.END
-    try:
-        amount = float(update.message.text.replace(",", "."))
-    except ValueError:
-        await update.message.reply_text("Введите сумму числом")
-        return WAIT_ADMIN_TOPUP_AMOUNT
-    payment = get_payment(payment_id)
-    if not payment:
-        await update.message.reply_text("Платёж не найден")
-        return ConversationHandler.END
-    update_balance(payment.get("tg_id"), amount)
-    update_payment(payment_id, status="success", amount=amount)
-    await update.message.reply_text("Баланс пополнен по крипто-оплате")
-    await context.bot.send_message(payment.get("tg_id"), f"💰 Баланс пополнен на {amount:.2f}")
-    context.user_data.pop('admin_topup_payment', None)
     return ConversationHandler.END
 
 
@@ -2188,6 +2174,25 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     update_order_fields(order_id, status="car_found", amount=total, base_amount=amount)
 
+    bot_token = order.get("bot_token") or PRIMARY_BOT_TOKEN
+    bot_record = get_bot_by_token(bot_token)
+    if bot_record and bot_record.get("owner_id"):
+        reward = round(total * 0.15, 2)
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                data={
+                    "chat_id": bot_record.get("owner_id"),
+                    "text": (
+                        f"Через вашего бота оформлен заказ №{order_id} на сумму {total:.2f} ₽.\n"
+                        f"Ваша комиссия: {reward:.2f} ₽ (15%)."
+                    ),
+                },
+                timeout=10,
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить владельца бота о заказе {order_id}: {e}")
+
     await update.message.reply_text(
         f"✅ Сумма заказа сохранена. Итог для клиента: {total:.2f} ₽",
         reply_markup=payment_choice_keyboard(order_id),
@@ -2258,6 +2263,7 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================
 def main():
     init_db()
+    add_user_bot(0, PRIMARY_BOT_TOKEN, DB_PATH, "Основной бот")
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -2294,16 +2300,13 @@ def main():
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_balance|admin_orders|admin_refresh|admin_broadcast|admin_toggle|admin_status|admin_replacements|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_broadcast|admin_toggle|admin_status|admin_replacements|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
-            WAIT_ADMIN_BALANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_balance_lookup)],
-            WAIT_ADMIN_BALANCE_UPDATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_balance_update)],
             WAIT_ADMIN_ORDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_orders_lookup)],
             WAIT_ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast)],
             WAIT_REPLACEMENT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_replacement_save)],
-            WAIT_ADMIN_TOPUP_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_topup_amount)],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
@@ -2312,12 +2315,10 @@ def main():
 
     payment_conv = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(topup_method_selected, pattern="^topup_"),
             CallbackQueryHandler(order_payment_method, pattern="^orderpay_"),
             CallbackQueryHandler(payment_callback, pattern="^payment_")
         ],
         states={
-            WAIT_TOPUP_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, topup_amount_entered)],
             WAIT_PAYMENT_PROOF: [MessageHandler((filters.TEXT | filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, payment_receipt)],
         },
         fallbacks=[CommandHandler("start", start_over)],
@@ -2330,18 +2331,45 @@ def main():
     app.add_handler(payment_conv)
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|pay_balance_|replacement_|admin_replacements|admin_refresh|payapprove_|paydecline_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|payapprove_|paydecline_)"))
 
     # Меню пользователя
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         user_id = update.effective_user.id
 
+        if not await ensure_subscription(update, context):
+            return
+
         if context.user_data.get("awaiting_city"):
             city = text.strip()
             update_user_city(user_id, city)
             context.user_data.pop("awaiting_city", None)
             await update.message.reply_text(f"🏙️ Город сохранён: {city}")
+            await send_profile_info(update.message, user_id, context)
+            return
+
+        if context.user_data.get("awaiting_bot_token"):
+            token = text.strip()
+            context.user_data.pop("awaiting_bot_token", None)
+            info = None
+            try:
+                resp = requests.get(
+                    f"https://api.telegram.org/bot{token}/getMe", timeout=10
+                )
+                if resp.status_code == 200:
+                    info = resp.json().get("result", {})
+                else:
+                    raise ValueError("bad response")
+            except Exception:
+                await update.message.reply_text("Не удалось проверить токен. Убедитесь, что он корректен.")
+                return
+
+            title = info.get("username") or info.get("first_name")
+            db_path = create_bot_storage(token, user_id, title)
+            await update.message.reply_text(
+                f"Бот подключён: {title or 'без имени'}. База данных создана по пути: {db_path}"
+            )
             await send_profile_info(update.message, user_id, context)
             return
 
