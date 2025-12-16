@@ -481,8 +481,8 @@ def get_latest_user_order(tg_id):
 # ==========================
 def create_order(
     tg_id,
-    bot_token=None,
     type_,
+    bot_token=None,
     screenshot_path=None,
     city=None,
     address_from=None,
@@ -895,7 +895,7 @@ def child_seat_type_keyboard():
         [InlineKeyboardButton("🧸 9м - 4л", callback_data="seat_type_9м-4л")],
         [InlineKeyboardButton("🧝 3-7л", callback_data="seat_type_3-7л")],
         [InlineKeyboardButton("🧝 6-12л", callback_data="seat_type_6-12л")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="seat_type_exit")],
+        [InlineKeyboardButton("🎄 Назад", callback_data="seat_type_exit")],
     ])
 
 
@@ -905,7 +905,7 @@ def additional_options_keyboard(order_data):
     child_seat_type = order_data.get("child_seat_type")
 
     def mark(text, active):
-        return f"{'🎉' if active else '⬜️'} {text}"
+        return f"{'🎉' if active else '❄️'} {text}"
 
     child_selected = child_seat is not None and child_seat != "Не требуется"
     child_label = "Детское кресло"
@@ -916,14 +916,14 @@ def additional_options_keyboard(order_data):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(mark(child_label, child_selected), callback_data="additional_child")],
         [InlineKeyboardButton(mark("Перевозка животных ❄️", "Перевозка животных" in selected_wishes), callback_data="additional_animals")],
-        [InlineKeyboardButton(mark("Буду с инвалидным креслом ♿", "Буду с инвалидным креслом" in selected_wishes), callback_data="additional_wheelchair")],
-        [InlineKeyboardButton("🎉 Готово", callback_data="additional_done"), InlineKeyboardButton("⏭️ Пропустить", callback_data="additional_skip")],
+        [InlineKeyboardButton(mark("Буду с инвалидным креслом ❄️♿", "Буду с инвалидным креслом" in selected_wishes), callback_data="additional_wheelchair")],
+        [InlineKeyboardButton("🎉 Готово", callback_data="additional_done"), InlineKeyboardButton("⛄️ Пропустить", callback_data="additional_skip")],
     ])
 
 
 def replacement_fields_keyboard(info):
     def mark(value, label):
-        return f"{'🎉' if value else '➕'} {label}"
+        return f"{'🎉' if value else '🎁'} {label}"
 
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(mark(info.get("order_number"), "OrderID"), callback_data=f"replacement_field_orderid_{info['id']}")],
@@ -931,7 +931,7 @@ def replacement_fields_keyboard(info):
         [InlineKeyboardButton(mark(info.get("external_id"), "ID"), callback_data=f"replacement_field_extid_{info['id']}")],
         [InlineKeyboardButton(mark(info.get("token2"), "token2"), callback_data=f"replacement_field_token2_{info['id']}")],
         [InlineKeyboardButton(mark(info.get("link"), "Ссылка"), callback_data=f"replacement_field_link_{info['id']}")],
-        [InlineKeyboardButton("⬅️ Назад", callback_data="replacement_back")],
+        [InlineKeyboardButton("🎄 Назад", callback_data="replacement_back")],
     ])
 
 
@@ -940,7 +940,7 @@ def replacement_list_keyboard(infos):
     for info in infos:
         label = f"{info.get('created_at', '')}"
         buttons.append([InlineKeyboardButton(label, callback_data=f"replacement_view_{info['id']}")])
-    buttons.append([InlineKeyboardButton("⬅️ В админку", callback_data="replacement_back")])
+    buttons.append([InlineKeyboardButton("🎄 В админку", callback_data="replacement_back")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -959,7 +959,7 @@ def payment_methods_keyboard(prefix: str, order_id: int | None = None):
             [InlineKeyboardButton("🪙🎄 Litecoin", callback_data=f"{base}ltc")],
             [InlineKeyboardButton("🎁 USDT (TRC20)", callback_data=f"{base}usdt_trc20")],
             [InlineKeyboardButton("🎁 USDT (TRX)", callback_data=f"{base}usdt_trx")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="profile_back")],
+            [InlineKeyboardButton("🎄 Назад", callback_data="profile_back")],
         ]
     )
 
@@ -972,14 +972,14 @@ def admin_order_buttons(order_id):
 def admin_in_progress_buttons(order_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Поиск такси ✨", callback_data=f"search_{order_id}"),
-         InlineKeyboardButton("Отменить заказ ❎", callback_data=f"cancel_{order_id}")]
+         InlineKeyboardButton("Отменить заказ 🎄🚫", callback_data=f"cancel_{order_id}")]
     ])
 
 def admin_search_buttons(order_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Связаться с заказчиком 🔔", callback_data=f"chat_{order_id}")],
         [InlineKeyboardButton("Нашлась машина 🛷", callback_data=f"found_{order_id}"),
-         InlineKeyboardButton("Отменить поиск ⏹", callback_data=f"cancelsearch_{order_id}")]
+         InlineKeyboardButton("Отменить поиск ❄️🚫", callback_data=f"cancelsearch_{order_id}")]
     ])
 
 
@@ -991,7 +991,7 @@ def payment_choice_keyboard(order_id):
 
 def admin_panel_keyboard():
     ordering_enabled = is_ordering_enabled()
-    ordering_label = "⏹️ Остановить приём заказов" if ordering_enabled else "▶️ Включить приём заказов"
+    ordering_label = "⛄️ Остановить приём заказов" if ordering_enabled else "🎄 Включить приём заказов"
     status_text = "🎉 Заказы включены" if ordering_enabled else "🧊 Заказы выключены"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎁 Заказы пользователя", callback_data="admin_orders")],
@@ -1004,7 +1004,7 @@ def admin_panel_keyboard():
 
 
 async def admin_show_panel(target):
-    await target.reply_text("🔔 Админ-панель", reply_markup=admin_panel_keyboard())
+    await target.reply_text("🔔❄️ Админ-панель", reply_markup=admin_panel_keyboard())
 
 # ==========================
 # Обработчики команд
@@ -1147,7 +1147,7 @@ async def build_and_send_payment(user_id: int, method: str, amount: float | None
                 converted = round(amount / rate, 4)
                 amount = converted
         else:
-            rate_text = "⚠️ Курс недоступен, используйте рублёвый эквивалент"
+            rate_text = "❄️⚠️ Курс недоступен, используйте рублёвый эквивалент"
 
     payment_id = create_payment(
         tg_id=user_id,
@@ -1364,7 +1364,7 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ---- Клавиатура "Пропустить" ----
 def skip_keyboard():
-    return ReplyKeyboardMarkup([[KeyboardButton("Пропустить ➡️")]], resize_keyboard=True)
+    return ReplyKeyboardMarkup([[KeyboardButton("Пропустить 🎿")]], resize_keyboard=True)
 
 # ---- Скриншотный заказ (приём фото) ----
 async def screenshot_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1502,7 +1502,7 @@ async def favorite_address_callback(update: Update, context: ContextTypes.DEFAUL
 
 async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     comment = update.message.text
-    if comment and comment.lower() == "пропустить ➡️":
+    if comment and comment.lower() == "пропустить 🎿":
         comment = None
 
     order_type = context.user_data.get('order_type')
@@ -1621,7 +1621,7 @@ async def additional_selected(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data in {"additional_done", "additional_skip"}:
         await query.message.reply_text(
-            "Добавьте комментарий для админа или нажмите «Пропустить ➡️»",
+            "Добавьте комментарий для админа или нажмите «Пропустить 🎿»",
             reply_markup=skip_keyboard(),
         )
         return WAIT_COMMENT
@@ -1893,7 +1893,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             replacement_info_text(info),
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Назад", callback_data="replacement_back")],
+                [InlineKeyboardButton("🎄 Назад", callback_data="replacement_back")],
                 [InlineKeyboardButton("Завершить заказ 🎉", callback_data=f"replacement_finish_{info_id}")],
             ]),
         )
@@ -1967,9 +1967,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             crypto_methods = {"ltc", "usdt_trc20", "usdt_trx"}
             is_crypto = method in crypto_methods
             request_text = (
-                "⚠️ Оплата не найдена. Пришлите, пожалуйста, ссылку на транзакцию или свяжитесь с оператором."
+                "❄️⚠️ Оплата не найдена. Пришлите, пожалуйста, ссылку на транзакцию или свяжитесь с оператором."
                 if is_crypto
-                else "⚠️ Оплата не найдена. Пришлите, пожалуйста, чек в ответном сообщении или свяжитесь с оператором."
+                else "❄️⚠️ Оплата не найдена. Пришлите, пожалуйста, чек в ответном сообщении или свяжитесь с оператором."
             )
             button_label = "✨ Ссылка" if is_crypto else "🧾🎄 Чек"
             await context.bot.send_message(
@@ -2021,7 +2021,7 @@ async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_T
     if not saved:
         fallback = f"{info.get('external_id', '-')}/{info.get('order_number', '-')}/{info.get('card_x', '-')}/{info.get('token2', '-')}"
         await update.message.reply_text(
-            "⚠️ Не удалось сохранить подмену во вторую БД. Данные: " + fallback,
+            "❄️⚠️ Не удалось сохранить подмену во вторую БД. Данные: " + fallback,
             reply_markup=replacement_fields_keyboard(info),
         )
         return ConversationHandler.END
@@ -2178,7 +2178,7 @@ async def refresh_all_users(target, context: ContextTypes.DEFAULT_TYPE):
         f"🖊️❄️ Обновлено username: {updated}",
     ]
     if failed:
-        lines.append("⚠️ Не удалось обновить: " + ", ".join(map(str, failed)))
+        lines.append("❄️⚠️ Не удалось обновить: " + ", ".join(map(str, failed)))
 
     await target.reply_text("\n".join(lines), reply_markup=admin_panel_keyboard())
 
