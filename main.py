@@ -729,12 +729,20 @@ async def send_subscription_prompt(
     target = update.effective_message or (
         update.callback_query and update.callback_query.message
     )
+    text = (
+        message
+        or "❄️ Подпишитесь на канал, а затем нажмите «🎄 Проверить», чтобы продолжить."
+    )
     if target:
-        await target.reply_text(
-            message
-            or "❄️ Подпишитесь на канал, а затем нажмите «🎄 Проверить», чтобы продолжить.",
-            reply_markup=subscription_keyboard(),
-        )
+        await target.reply_text(text, reply_markup=subscription_keyboard())
+    else:
+        user = update.effective_user
+        if user:
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=text,
+                reply_markup=subscription_keyboard(),
+            )
 
 
 async def ensure_subscription(
@@ -757,9 +765,22 @@ async def ensure_subscription(
 
 
 async def subscription_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if await ensure_subscription(update, context, silent=True):
+    is_subscribed = await ensure_subscription(update, context, silent=True)
+    is_start_command = (
+        update.effective_message
+        and update.effective_message.text
+        and update.effective_message.text.startswith("/start")
+    )
+
+    if is_subscribed:
+        if is_start_command:
+            await start(update, context)
+            raise ApplicationHandlerStop
         return
+
     await send_subscription_prompt(update, context)
+    if is_start_command:
+        raise ApplicationHandlerStop
     raise ApplicationHandlerStop
 
 
@@ -2400,7 +2421,7 @@ def main():
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
-        per_message=False,
+        per_message=True,
     )
 
     admin_conv_handler = ConversationHandler(
@@ -2414,7 +2435,7 @@ def main():
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
-        per_message=False,
+        per_message=True,
     )
 
     payment_conv = ConversationHandler(
@@ -2427,7 +2448,7 @@ def main():
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
-        per_message=False,
+        per_message=True,
     )
 
     app.add_handler(conv_handler)
