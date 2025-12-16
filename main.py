@@ -1,5 +1,6 @@
 from cfg import *
 import os
+import asyncio
 import sqlite3
 import logging
 import requests
@@ -703,7 +704,9 @@ def admin_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if user_id not in ADMIN_IDS:
-            await update.message.reply_text("🎄🚫 У вас нет прав администратора")
+            target = update.effective_message
+            if target:
+                await target.reply_text("🎄🚫 У вас нет прав администратора")
             return
         return await func(update, context)
     return wrapper
@@ -1017,7 +1020,9 @@ def not_banned(func):
             c = conn.cursor()
             c.execute("SELECT 1 FROM banned WHERE tg_id=?", (tg_id,))
             if c.fetchone():
-                await update.message.reply_text("🎄🚫 Вы заблокированы и не можете использовать бота.")
+                target = update.effective_message
+                if target:
+                    await target.reply_text("🎄🚫 Вы заблокированы и не можете использовать бота.")
                 return
         if not await ensure_subscription(update, context):
             return
@@ -1029,10 +1034,18 @@ def not_banned(func):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_user(user.id, user.username)
-    await update.message.reply_text(
-        f"Привет, @{user.username or 'не указан'}! Добро пожаловать в сервис заказа такси 🛷",
-        reply_markup=main_menu_keyboard(user.id)
-    )
+    target = update.effective_message
+    if target:
+        await target.reply_text(
+            f"Привет, @{user.username or 'не указан'}! Добро пожаловать в сервис заказа такси 🛷",
+            reply_markup=main_menu_keyboard(user.id),
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=f"Привет, @{user.username or 'не указан'}! Добро пожаловать в сервис заказа такси 🛷",
+            reply_markup=main_menu_keyboard(user.id),
+        )
 
 
 async def start_over(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1085,7 +1098,7 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. Для заказа такси нажмите «Заказать такси 🛷».\n"
         "2. Вы можете отправить заказ скриншотом или текстом.\n"
         "3. Статус заказа отслеживается через уведомления.\n"
-        "4. При проблемах — пишите @MikeWazovsk1y"
+        "4. При проблемах — пишите @TakeMaxist"
     )
     await update.message.reply_text(text, reply_markup=back_keyboard())
 
@@ -1705,13 +1718,13 @@ async def notify_replacement_done(info, context):
     text = (
         "✨ Поездка успешно завершена!\n\n"
         "Спасибо, что выбрали нас.\n"
-        "🎺 Канал: @FreeEatTaxi\n"
-        "🧑‍🎄‍🎄 Админ: @MikeWazovsk1y\n\n"
+        "🎺 Канал: @TaxiFromMike\n"
+        "🧑‍🎄‍🎄 Админ: @TakeMaxist\n\n"
         "Нажмите /start, чтобы вернуться в главное меню.\n"
         "Поделитесь, пожалуйста, отзывом в чате — нам важно ваше мнение! 🔔"
     )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Оставить отзыв", url="https://t.me/+kE869Hcdm_w1OWVh")]
+        [InlineKeyboardButton("Оставить отзыв", url="https://t.me/+z_S1iZMVW-ZmMzBi")]
     ])
     try:
         await context.bot.send_message(tg_id, text, reply_markup=keyboard)
@@ -1769,6 +1782,16 @@ async def notify_admins_payment(context: ContextTypes.DEFAULT_TYPE, payment_id: 
             logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
 
+async def animate_status_message(message, frames: list[str], delay: int = 3):
+    """Плавно обновляет текст сообщения для создания вау-эффекта."""
+    for text in frames:
+        await asyncio.sleep(delay)
+        try:
+            await message.edit_text(text)
+        except Exception as e:
+            logger.warning(f"Не удалось обновить статус сообщения: {e}")
+
+
 # ==========================
 # CallbackQuery обработка (админ)
 # ==========================
@@ -1792,7 +1815,18 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=admin_in_progress_buttons(order_id))
 
         user_id = order.get("tg_id")
-        await context.bot.send_message(user_id, f"Ваш заказ №{order_id} взят в работу! 🛷")
+        status_message = await context.bot.send_message(
+            user_id, f"🎄 Ваш заказ №{order_id} взят в работу! 🛷"
+        )
+        context.application.create_task(
+            animate_status_message(
+                status_message,
+                [
+                    f"✨ Мы уже работаем над вашим заказом №{order_id}! ❄️",
+                    f"🎁 Активно занимаемся вашим заказом №{order_id}! ⛄️",
+                ],
+            )
+        )
 
         # удаляем сообщение у других админов
         for admin_id in ADMIN_IDS:
@@ -1817,7 +1851,19 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=admin_search_buttons(order_id))
         order = get_order(order_id)
         user_id = order.get("tg_id")
-        await context.bot.send_message(user_id, f"Начинаем поиск такси для вашего заказа №{order_id}! ⏳")
+        search_message = await context.bot.send_message(
+            user_id,
+            f"🎄 Начинаем поиск такси для вашего заказа №{order_id}! 🛷",
+        )
+        context.application.create_task(
+            animate_status_message(
+                search_message,
+                [
+                    f"✨ Мы подбираем лучшее предложение для заказа №{order_id}! ❄️",
+                    f"🎆 Активно ищем такси для заказа №{order_id}! 🎁",
+                ],
+            )
+        )
     # Отмена поиска / заказ
     elif data.startswith("cancel_") or data.startswith("cancelsearch_"):
         order_id = int(data.split("_")[1])
