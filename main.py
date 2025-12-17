@@ -296,8 +296,37 @@ def is_ordering_enabled():
 # ==========================
 # Работа с пользователями
 # ==========================
+def safe_token_slug(token: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in (token or ""))[:32] or "bot"
+
+
+def get_bot_db_path(token: str) -> str:
+    record = get_bot_by_token(token)
+    if record and record.get("db_path"):
+        return record["db_path"]
+    return DB_PATH
+
+
 def add_user(tg_id, username):
     with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO users (tg_id, username)
+            VALUES (?, ?)
+            ON CONFLICT(tg_id) DO UPDATE SET username = COALESCE(excluded.username, users.username)
+            """,
+            (tg_id, username),
+        )
+        conn.commit()
+
+
+def add_user_to_bot_db(tg_id: int, username: str | None, bot_token: str | None):
+    if not bot_token:
+        return
+    bot_db = get_bot_db_path(bot_token)
+    init_db(bot_db)
+    with sqlite3.connect(bot_db) as conn:
         c = conn.cursor()
         c.execute(
             """
@@ -361,11 +390,41 @@ def delete_favorite_address(fav_id, tg_id):
         conn.commit()
 
 
-def get_all_user_ids():
-    with sqlite3.connect(USERS_DB) as conn:
+def get_all_user_ids(db_path: str = USERS_DB):
+    with sqlite3.connect(db_path) as conn:
         c = conn.cursor()
         c.execute("SELECT tg_id FROM users")
         return [row[0] for row in c.fetchall()]
+
+
+def count_bot_users(bot_token: str) -> int:
+    db_path = get_bot_db_path(bot_token)
+    if not os.path.exists(db_path):
+        return 0
+    with sqlite3.connect(db_path) as conn:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM users")
+        row = c.fetchone()
+        return row[0] if row else 0
+
+
+def count_bot_orders(bot_token: str) -> int:
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM orders WHERE bot_token=?", (bot_token,))
+        row = c.fetchone()
+        return row[0] if row else 0
+
+
+def calc_owner_earnings(bot_token: str) -> float:
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT SUM(COALESCE(amount, base_amount, 0)) FROM orders WHERE bot_token=?",
+            (bot_token,),
+        )
+        total = c.fetchone()[0] or 0
+        return round(total * 0.15, 2)
 
 
 def add_user_bot(owner_id: int, token: str, db_path: str, title: str | None = None):
@@ -417,11 +476,15 @@ def get_bot_by_token(token: str):
 
 
 def create_bot_storage(token: str, owner_id: int, title: str | None = None):
-    db_path = DB_PATH
+    slug = safe_token_slug(token)
+    bot_dir = os.path.join(DB_DIR, slug)
+    os.makedirs(bot_dir, exist_ok=True)
+    db_path = os.path.join(bot_dir, "bot.db")
     init_db(db_path)
     set_setting("bot_owner", str(owner_id), db_path=db_path)
     set_setting("bot_token", token, db_path=db_path)
     add_user_bot(owner_id, token, db_path, title)
+    logger.info("Создано хранилище для бота %s в %s", token, db_path)
     return db_path
 
 
@@ -561,7 +624,37 @@ def create_order(
         )
         order_id = c.lastrowid
         conn.commit()
-        return order_id
+    bot_db = get_bot_db_path(bot_token or PRIMARY_BOT_TOKEN)
+    if bot_db != ORDERS_DB:
+        init_db(bot_db)
+        with sqlite3.connect(bot_db) as conn:
+            c = conn.cursor()
+            c.execute(
+                """
+                INSERT INTO orders (
+                    tg_id, bot_token, type, screenshot_path, city, address_from, address_to, address_extra,
+                    tariff, child_seat, child_seat_type, wishes, comment
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    tg_id,
+                    bot_token or PRIMARY_BOT_TOKEN,
+                    type_,
+                    screenshot_path,
+                    city,
+                    address_from,
+                    address_to,
+                    address_extra,
+                    tariff,
+                    child_seat,
+                    child_seat_type,
+                    wishes,
+                    comment,
+                ),
+            )
+            conn.commit()
+    return order_id
 
 
 def get_order(order_id):
@@ -1073,6 +1166,7 @@ def admin_panel_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎁 Заказы пользователя", callback_data="admin_orders")],
         [InlineKeyboardButton("🔔 Обновить информацию", callback_data="admin_refresh")],
+        [InlineKeyboardButton("📡 Все боты", callback_data="admin_all_bots")],
         [InlineKeyboardButton("🎺 Рассылка по всем", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🔔 Заказы для подмены", callback_data="admin_replacements")],
         [InlineKeyboardButton("🧹 Очистить подмены", callback_data="admin_podmena_clear")],
@@ -1083,6 +1177,24 @@ def admin_panel_keyboard():
 
 async def admin_show_panel(target):
     await target.reply_text("🔔❄️ Админ-панель", reply_markup=admin_panel_keyboard())
+
+
+def admins_bots_keyboard():
+    bots = list_all_bots()
+    seen = set()
+    buttons = []
+    for bot in bots:
+        owner_id = bot.get("owner_id")
+        if owner_id in seen:
+            continue
+        seen.add(owner_id)
+        user = get_user(owner_id)
+        label = f"@{user.get('username')}" if user and user.get("username") else f"ID {owner_id}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"admin_owner_{owner_id}")])
+    if not buttons:
+        buttons.append([InlineKeyboardButton("Нет подключённых ботов", callback_data="admin_status")])
+    buttons.append([InlineKeyboardButton("🎄 Главное меню", callback_data="admin_status")])
+    return InlineKeyboardMarkup(buttons)
 
 # ==========================
 # Обработчики команд
@@ -1107,6 +1219,7 @@ def not_banned(func):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_user(user.id, user.username)
+    add_user_to_bot_db(user.id, user.username, context.bot.token)
     target = update.effective_message
     if target:
         await target.reply_text(
@@ -2205,6 +2318,38 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_refresh":
         await refresh_all_users(query.message, context)
         return ConversationHandler.END
+    elif data == "admin_all_bots":
+        await query.message.reply_text(
+            "📡 Подключённые боты по владельцам:", reply_markup=admins_bots_keyboard()
+        )
+        return ConversationHandler.END
+    elif data.startswith("admin_owner_"):
+        owner_id = int(data.rsplit("_", 1)[1])
+        bots = list_user_bots(owner_id)
+        if not bots:
+            await query.message.reply_text(
+                "У пользователя нет подключённых ботов", reply_markup=admin_panel_keyboard()
+            )
+            return ConversationHandler.END
+        owner = get_user(owner_id) or {}
+        lines = [f"🧑‍💻 Владелец: @{owner.get('username') or owner_id}"]
+        for bot in bots:
+            token = bot.get("token")
+            lines.append(
+                "\n".join(
+                    [
+                        "🤖 Бот: " + (bot.get("title") or "Без названия"),
+                        f"🔑 Токен: {token}",
+                        f"👥 Пользователи: {count_bot_users(token)}",
+                        f"🧾 Заказы: {count_bot_orders(token)}",
+                        f"💸 Доход владельца: {calc_owner_earnings(token):.2f} ₽",
+                    ]
+                )
+            )
+        await query.message.reply_text(
+            "\n\n".join(lines), reply_markup=admins_bots_keyboard()
+        )
+        return ConversationHandler.END
     elif data == "admin_broadcast":
         await query.message.reply_text(
             "📣 Пришлите текст или фото для рассылки по базе (Такси от Майка)",
@@ -2485,32 +2630,41 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_message = await msg.reply_text("⏳ Обрабатываю рассылку...")
 
-    user_ids = get_all_user_ids()
     sent = 0
     failed = 0
     blocked = 0
 
-    for idx, uid in enumerate(user_ids, start=1):
-        try:
-            action = ChatAction.UPLOAD_PHOTO if photo else ChatAction.TYPING
-            await context.bot.send_chat_action(uid, action)
-            if photo:
-                await context.bot.send_photo(uid, photo=photo.file_id, caption=content_text)
-            else:
-                await context.bot.send_message(uid, f"🎺 Такси от Майка:\n{content_text}")
-            sent += 1
-        except Forbidden:
-            blocked += 1
-            logger.warning("Пользователь %s заблокировал бота", uid)
-        except Exception as e:
-            failed += 1
-            logger.error(f"Не удалось отправить сообщение {uid}: {e}")
+    bots = list_all_bots()
+    if not bots:
+        await status_message.edit_text("Нет подключённых ботов", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
 
-        if idx % 20 == 0:
-            await asyncio.sleep(0.5)
+    for bot_record in bots:
+        token = bot_record.get("token")
+        db_path = bot_record.get("db_path") or DB_PATH
+        bot_instance = Bot(token=token)
+        user_ids = get_all_user_ids(db_path)
+        for idx, uid in enumerate(user_ids, start=1):
+            try:
+                action = ChatAction.UPLOAD_PHOTO if photo else ChatAction.TYPING
+                await bot_instance.send_chat_action(uid, action)
+                if photo:
+                    await bot_instance.send_photo(uid, photo=photo.file_id, caption=content_text)
+                else:
+                    await bot_instance.send_message(uid, f"🎺 Такси от Майка:\n{content_text}")
+                sent += 1
+            except Forbidden:
+                blocked += 1
+                logger.warning("Пользователь %s заблокировал бота %s", uid, token)
+            except Exception as e:
+                failed += 1
+                logger.error(f"Не удалось отправить сообщение {uid} через {token}: {e}")
+
+            if idx % 20 == 0:
+                await asyncio.sleep(0.5)
 
     summary_lines = [
-        "📣 Рассылка завершена", 
+        "📣 Рассылка завершена",
         f"✅ Доставлено: {sent}",
         f"🚫 Блок: {blocked}",
         f"⚠️ Ошибок: {failed}",
@@ -2675,7 +2829,7 @@ def configure_application(app):
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_broadcast|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
@@ -2711,7 +2865,7 @@ def configure_application(app):
     app.add_handler(payment_conv)
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_broadcast|admin_podmena_clear|payapprove_|paydecline_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_podmena_clear|payapprove_|paydecline_)"))
 
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
