@@ -7,6 +7,7 @@ import logging
 import requests
 import random
 import time
+import warnings
 from datetime import datetime
 from functools import wraps
 
@@ -25,6 +26,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler, ConversationHandler,
 )
+from telegram.warnings import PTBUserWarning
 
 TOKEN = os.getenv("BOT_TOKEN") or TOKEN
 PRIMARY_BOT_TOKEN = locals().get("PRIMARY_BOT_TOKEN") or os.getenv("PRIMARY_BOT_TOKEN") or TOKEN
@@ -60,6 +62,8 @@ USDT_TRX_WALLET = (
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
+
+warnings.filterwarnings("ignore", category=PTBUserWarning)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -388,9 +392,7 @@ def get_bot_by_token(token: str):
 
 
 def create_bot_storage(token: str, owner_id: int, title: str | None = None):
-    folder = os.path.join(DB_DIR, "user_bots", f"bot_{int(time.time())}")
-    os.makedirs(folder, exist_ok=True)
-    db_path = os.path.join(folder, "bot.db")
+    db_path = DB_PATH
     init_db(db_path)
     set_setting("bot_owner", str(owner_id), db_path=db_path)
     set_setting("bot_token", token, db_path=db_path)
