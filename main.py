@@ -731,7 +731,7 @@ async def send_subscription_prompt(
     )
     text = (
         message
-        or "❄️ Подпишитесь на канал, а затем нажмите «🎄 Проверить», чтобы продолжить."
+        or "❄️✨ Подпишитесь на наш зимний канал и нажмите «🎄 Проверить», чтобы вернуться к волшебному меню!"
     )
     if target:
         await target.reply_text(text, reply_markup=subscription_keyboard())
@@ -748,6 +748,8 @@ async def send_subscription_prompt(
 async def ensure_subscription(
     update: Update, context: ContextTypes.DEFAULT_TYPE, silent: bool = False
 ) -> bool:
+    if context.user_data.get("subscription_verified"):
+        return True
     if not REQUIRED_CHANNEL:
         return True
     user = update.effective_user
@@ -761,6 +763,7 @@ async def ensure_subscription(
         if not silent:
             await send_subscription_prompt(update, context)
         return False
+    context.user_data["subscription_verified"] = True
     return True
 
 
@@ -792,9 +795,10 @@ async def check_subscription_callback(
         await query.answer()
 
     if await ensure_subscription(update, context, silent=True):
+        context.user_data["subscription_verified"] = True
         if query and query.message:
             await query.message.edit_text(
-                "🎉 Подписка подтверждена! Возвращаем вас в меню.",
+                "🎉❄️ Подписка подтверждена! Возвращаем вас в праздничное меню.",
                 reply_markup=None,
             )
         await start(update, context)
@@ -1058,13 +1062,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.effective_message
     if target:
         await target.reply_text(
-            f"Привет, @{user.username or 'не указан'}! Добро пожаловать в сервис заказа такси 🛷",
+            f"🎄 Привет, @{user.username or 'не указан'}! Добро пожаловать в сказочный сервис заказа такси 🎆🛷",
             reply_markup=main_menu_keyboard(user.id),
         )
     else:
         await context.bot.send_message(
             chat_id=user.id,
-            text=f"Привет, @{user.username or 'не указан'}! Добро пожаловать в сервис заказа такси 🛷",
+            text=f"🎄 Привет, @{user.username or 'не указан'}! Добро пожаловать в сказочный сервис заказа такси 🎆🛷",
             reply_markup=main_menu_keyboard(user.id),
         )
 
