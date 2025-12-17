@@ -2371,7 +2371,7 @@ def configure_application(app):
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
-        per_message=True,
+        per_message=False,
     )
 
     admin_conv_handler = ConversationHandler(
@@ -2385,7 +2385,7 @@ def configure_application(app):
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
-        per_message=True,
+        per_message=False,
     )
 
     payment_conv = ConversationHandler(
@@ -2398,7 +2398,7 @@ def configure_application(app):
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
-        per_message=True,
+        per_message=False,
     )
 
     app.add_handler(conv_handler)
