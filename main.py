@@ -83,7 +83,6 @@ primary_bot = Bot(token=PRIMARY_BOT_TOKEN)
 
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(DB_DIR, exist_ok=True)
-init_podmena_db()
 
 
 def current_timestamp():
@@ -2830,6 +2829,7 @@ async def stop_bot(token: str):
 
 async def main_async():
     init_db()
+    init_podmena_db()
     add_user_bot(0, PRIMARY_BOT_TOKEN, DB_PATH, "Основной бот")
     tokens = {TOKEN, PRIMARY_BOT_TOKEN}
     for bot in list_all_bots():
