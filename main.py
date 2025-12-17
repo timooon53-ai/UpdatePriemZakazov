@@ -952,6 +952,30 @@ def payment_methods_keyboard(prefix: str, order_id: int | None = None):
         ]
     )
 
+
+async def send_payment_menu(order: dict, bot: Bot):
+    if not order:
+        return
+
+    order_id = order.get("id")
+    base_amount = order.get("base_amount") or order.get("amount") or 0
+    total = order.get("amount") or base_amount
+    tg_id = order.get("tg_id")
+
+    message = (
+        "🧾🎄 Оплата поездки\n"
+        f"🛷 Заказ №{order_id}\n"
+        f"🎁 Стоимость: {base_amount:.2f} ₽\n"
+        f"К оплате: {total:.2f} ₽\n\n"
+        "Выберите удобный способ оплаты:"
+    )
+
+    await bot.send_message(
+        tg_id,
+        message,
+        reply_markup=payment_methods_keyboard("orderpay_", order_id),
+    )
+
 def admin_order_buttons(order_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Взял в работу 🎉", callback_data=f"take_{order_id}"),
@@ -1380,33 +1404,35 @@ def order_confirmation_keyboard():
 
 
 def build_order_preview_text(order_data, order_type):
-    parts = ["Проверьте данные заказа:"]
-    parts.append(f"Тип: {'Скриншот' if order_type == 'screenshot' else 'Текст'}")
+    parts = ["🎄✨ Проверьте данные заказа:"]
+    parts.append(f"📸 Формат: {'🖼️ Скриншот' if order_type == 'screenshot' else '📝 Текст'}")
 
     if order_data.get('city'):
-        parts.append(f"Город: {order_data['city']}")
+        parts.append(f"🏙️ Город: {order_data['city']}")
     if order_data.get('address_from'):
-        parts.append(f"Откуда: {order_data['address_from']}")
+        parts.append(f"🎁 Откуда: {order_data['address_from']}")
     if order_data.get('address_to'):
-        parts.append(f"Куда: {order_data['address_to']}")
+        parts.append(f"🎁 Куда: {order_data['address_to']}")
     if order_data.get('address_extra'):
-        parts.append(f"Доп. адрес: {order_data['address_extra']}")
+        parts.append(f"🧭 Доп. адрес: {order_data['address_extra']}")
     if order_data.get('tariff'):
-        parts.append(f"Тариф: {order_data['tariff']}")
+        parts.append(f"⛄️ Тариф: {order_data['tariff']}")
     if order_data.get('child_seat'):
-        parts.append(f"Детское кресло: {order_data['child_seat']}")
+        parts.append(f"🛷 Детское кресло: {order_data['child_seat']}")
     if order_data.get('child_seat_type'):
-        parts.append(f"Тип кресла: {order_data['child_seat_type']}")
+        parts.append(f"❄️ Тип кресла: {order_data['child_seat_type']}")
     if order_data.get('wishes'):
         wishes = order_data.get('wishes')
         wishes_text = ", ".join(wishes) if isinstance(wishes, (list, tuple, set)) else wishes
-        parts.append(f"Пожелания: {wishes_text}")
+        parts.append(f"🎇 Пожелания: {wishes_text}")
 
     comment = order_data.get('comment')
-    parts.append(f"Комментарий: {comment if comment else 'не указан'}")
+    parts.append(f"📝 Комментарий: {comment if comment else 'не указан'}")
 
     if order_type == "screenshot":
-        parts.append("Скриншот: прикреплён")
+        parts.append("🖼️ Скриншот: прикреплён")
+
+    parts.append("\n✨ Если всё верно — отправляйте заказ!")
 
     return "\n".join(parts)
 
@@ -2033,21 +2059,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not order:
             await query.answer("Заказ не найден", show_alert=True)
             return ConversationHandler.END
-        base_amount = order.get("base_amount") or order.get("amount") or 0
-        tg_id = order.get("tg_id")
-        total = order.get("amount") or base_amount
-        message = (
-            "🧾🎄 Оплата поездки\n"
-            f"🛷 Заказ №{order_id}\n"
-            f"🎁 Стоимость: {base_amount:.2f} ₽\n"
-            f"К оплате: {total:.2f} ₽\n\n"
-            "Выберите удобный способ оплаты:"
-        )
-        await context.bot.send_message(
-            tg_id,
-            message,
-            reply_markup=payment_methods_keyboard("orderpay_", order_id),
-        )
+        await send_payment_menu(order, context.bot)
         await query.message.reply_text("Меню оплаты отправлено клиенту")
     elif data.startswith("replacement_offer_add_"):
         order_id = int(data.rsplit("_", 1)[1])
@@ -2411,6 +2423,10 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     update_order_fields(order_id, status="car_found", amount=total, base_amount=amount)
 
+    updated_order = dict(order or {})
+    updated_order.update({"id": order_id, "amount": total, "base_amount": amount})
+    await send_payment_menu(updated_order, context.bot)
+
     bot_token = order.get("bot_token") or PRIMARY_BOT_TOKEN
     bot_record = get_bot_by_token(bot_token)
     if bot_record and bot_record.get("owner_id"):
@@ -2431,7 +2447,7 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Не удалось уведомить владельца бота о заказе {order_id}: {e}")
 
     await update.message.reply_text(
-        f"🎉 Сумма заказа сохранена. Итог для клиента: {total:.2f} ₽",
+        f"🎉 Сумма заказа сохранена. Итог для клиента: {total:.2f} ₽. Меню оплаты отправлено клиенту",
         reply_markup=payment_choice_keyboard(order_id),
     )
 
