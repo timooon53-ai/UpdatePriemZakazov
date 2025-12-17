@@ -79,8 +79,8 @@ def current_timestamp():
 def required_channel_link() -> str:
     channel_id = str(REQUIRED_CHANNEL)
     if channel_id.startswith("-100") and channel_id[4:].isdigit():
-        return f"https://t.me/c/{channel_id[4:]}"
-    return f"https://t.me/{channel_id.lstrip('@')}"
+        return f"https://t.me/TaxiFromMike"
+    return f"https://t.me/TaxiFromMike"
 
 # ==========================
 # Инициализация БД
