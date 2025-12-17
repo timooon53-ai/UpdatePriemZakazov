@@ -440,7 +440,10 @@ def calc_owner_earnings(bot_token: str) -> float:
         return round(total * 0.15, 2)
 
 
-def add_user_bot(owner_id: int, token: str, db_path: str, title: str | None = None):
+def add_user_bot(
+    owner_id: int, token: str, db_path: str | os.PathLike[str], title: str | None = None
+):
+    db_path_str = str(db_path)
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
         c.execute(
@@ -448,7 +451,7 @@ def add_user_bot(owner_id: int, token: str, db_path: str, title: str | None = No
             INSERT OR REPLACE INTO user_bots (owner_id, token, db_path, title)
             VALUES (?, ?, ?, ?)
             """,
-            (owner_id, token, db_path, title),
+            (owner_id, token, db_path_str, title),
         )
         conn.commit()
 
