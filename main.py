@@ -19,7 +19,6 @@ from telegram import (
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler, ConversationHandler,
-    ApplicationHandlerStop,
 )
 
 TOKEN = os.getenv("BOT_TOKEN") or TOKEN
@@ -81,6 +80,11 @@ def required_channel_link() -> str:
     if channel_id.startswith("-100") and channel_id[4:].isdigit():
         return f"https://t.me/TaxiFromMike"
     return f"https://t.me/TaxiFromMike"
+
+
+CHANNEL_URL = (os.getenv("CHANNEL_URL") or required_channel_link()).strip()
+OPERATOR_URL = (os.getenv("OPERATOR_URL") or required_channel_link()).strip()
+CHAT_URL = (os.getenv("CHAT_URL") or required_channel_link()).strip()
 
 # ==========================
 # Инициализация БД
@@ -713,102 +717,29 @@ def admin_only(func):
 
 
 def subscription_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("🎄 Проверить", callback_data="check_subscription"),
-                InlineKeyboardButton("🎁 Подписаться", url=required_channel_link()),
-            ]
-        ]
-    )
+    return InlineKeyboardMarkup([])
 
 
 async def send_subscription_prompt(
     update: Update, context: ContextTypes.DEFAULT_TYPE, message: str | None = None
 ):
-    target = update.effective_message or (
-        update.callback_query and update.callback_query.message
-    )
-    text = (
-        message
-        or "❄️✨ Подпишитесь на наш зимний канал и нажмите «🎄 Проверить», чтобы вернуться к волшебному меню!"
-    )
-    if target:
-        await target.reply_text(text, reply_markup=subscription_keyboard())
-    else:
-        user = update.effective_user
-        if user:
-            await context.bot.send_message(
-                chat_id=user.id,
-                text=text,
-                reply_markup=subscription_keyboard(),
-            )
+    return None
 
 
 async def ensure_subscription(
     update: Update, context: ContextTypes.DEFAULT_TYPE, silent: bool = False
 ) -> bool:
-    if context.user_data.get("subscription_verified"):
-        return True
-    if not REQUIRED_CHANNEL:
-        return True
-    user = update.effective_user
-    if not user:
-        return False
-    try:
-        member = await context.bot.get_chat_member(REQUIRED_CHANNEL, user.id)
-        if member.status in {"left", "kicked"}:
-            raise ValueError("not subscribed")
-    except Exception:
-        if not silent:
-            await send_subscription_prompt(update, context)
-        return False
-    context.user_data["subscription_verified"] = True
     return True
 
 
 async def subscription_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    is_subscribed = await ensure_subscription(update, context, silent=True)
-    is_start_command = (
-        update.effective_message
-        and update.effective_message.text
-        and update.effective_message.text.startswith("/start")
-    )
-
-    if is_subscribed:
-        if is_start_command:
-            await start(update, context)
-            raise ApplicationHandlerStop
-        return
-
-    await send_subscription_prompt(update, context)
-    if is_start_command:
-        raise ApplicationHandlerStop
-    raise ApplicationHandlerStop
+    return
 
 
 async def check_subscription_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    query = update.callback_query
-    if query:
-        await query.answer()
-
-    if await ensure_subscription(update, context, silent=True):
-        context.user_data["subscription_verified"] = True
-        if query and query.message:
-            await query.message.edit_text(
-                "🎉❄️ Подписка подтверждена! Возвращаем вас в праздничное меню.",
-                reply_markup=None,
-            )
-        await start(update, context)
-        return
-
-    await send_subscription_prompt(
-        update,
-        context,
-        "❄️ Подписка пока не найдена. Перейдите в канал и попробуйте снова.",
-    )
+    return
 
 # ==========================
 # Клавиатуры
@@ -825,6 +756,17 @@ def main_menu_keyboard(user_id=None):
 
 def back_keyboard():
     return ReplyKeyboardMarkup([[KeyboardButton("Назад 🎄")]], resize_keyboard=True)
+
+
+def start_links_keyboard():
+    buttons = [
+        [
+            InlineKeyboardButton("🎄 Канал", url=CHANNEL_URL),
+            InlineKeyboardButton("✨ Оператор", url=OPERATOR_URL),
+        ],
+        [InlineKeyboardButton("❄️ Чат", url=CHAT_URL)],
+    ]
+    return InlineKeyboardMarkup(buttons)
 
 
 def profile_keyboard(has_city: bool, has_favorites: bool):
@@ -1049,8 +991,6 @@ def not_banned(func):
                 if target:
                     await target.reply_text("🎄🚫 Вы заблокированы и не можете использовать бота.")
                 return
-        if not await ensure_subscription(update, context):
-            return
         return await func(update, context)
     return wrapper
 
@@ -1063,12 +1003,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if target:
         await target.reply_text(
             f"🎄 Привет, @{user.username or 'не указан'}! Добро пожаловать в сказочный сервис заказа такси 🎆🛷",
-            reply_markup=main_menu_keyboard(user.id),
+            reply_markup=start_links_keyboard(),
+        )
+        await target.reply_text(
+            "🎁 Главное меню готово к волшебству!", reply_markup=main_menu_keyboard(user.id)
         )
     else:
         await context.bot.send_message(
             chat_id=user.id,
             text=f"🎄 Привет, @{user.username or 'не указан'}! Добро пожаловать в сказочный сервис заказа такси 🎆🛷",
+            reply_markup=start_links_keyboard(),
+        )
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="🎁 Главное меню готово к волшебству!",
             reply_markup=main_menu_keyboard(user.id),
         )
 
@@ -1243,8 +1191,6 @@ async def build_and_send_payment(user_id: int, method: str, amount: float | None
 async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not await ensure_subscription(update, context):
-        return ConversationHandler.END
     data = query.data
     user_id = query.from_user.id
 
@@ -1367,8 +1313,6 @@ async def order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not await ensure_subscription(update, context):
-        return ConversationHandler.END
     if not is_ordering_enabled():
         await query.message.reply_text(
             "🔔 Заказ такси временно недоступен. Бот на технических работах, попробуйте позже.",
@@ -2389,15 +2333,6 @@ def main():
     add_user_bot(0, PRIMARY_BOT_TOKEN, DB_PATH, "Основной бот")
     app = ApplicationBuilder().token(TOKEN).build()
 
-    app.add_handler(
-        MessageHandler(filters.ALL, subscription_gate),
-        group=0,
-    )
-    app.add_handler(
-        CallbackQueryHandler(check_subscription_callback, pattern="^check_subscription$"),
-        group=0,
-    )
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("ban", ban_user))
@@ -2466,9 +2401,6 @@ def main():
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         user_id = update.effective_user.id
-
-        if not await ensure_subscription(update, context):
-            return
 
         if context.user_data.get("awaiting_city"):
             city = text.strip()
