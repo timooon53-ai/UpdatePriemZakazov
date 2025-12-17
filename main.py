@@ -11,6 +11,7 @@ import warnings
 import shutil
 from datetime import datetime
 from functools import wraps
+from pathlib import Path
 
 
 DEFAULT_CHANNEL_URL = "https://t.me/TaxiFromMike"
@@ -31,20 +32,31 @@ from telegram.ext import (
 )
 from telegram.warnings import PTBUserWarning
 
-TOKEN = os.getenv("BOT_TOKEN") or TOKEN
-PRIMARY_BOT_TOKEN = locals().get("PRIMARY_BOT_TOKEN") or os.getenv("PRIMARY_BOT_TOKEN") or TOKEN
-ADMIN_IDS = ADMIN_IDS
-SCREENSHOTS_DIR = SCREENSHOTS_DIR
-DB_DIR = DB_DIR
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_DB_DIR = BASE_DIR / "db"
+DEFAULT_SCREENSHOTS_DIR = BASE_DIR / "screens"
 
-DB_PATH = os.getenv("DB_PATH") or DB_PATH
+TOKEN = os.getenv("BOT_TOKEN") or locals().get("TOKEN")
+PRIMARY_BOT_TOKEN = (
+    locals().get("PRIMARY_BOT_TOKEN") or os.getenv("PRIMARY_BOT_TOKEN") or TOKEN
+)
+ADMIN_IDS = locals().get("ADMIN_IDS", [])
+SCREENSHOTS_DIR = Path(
+    os.getenv("SCREENSHOTS_DIR")
+    or locals().get("SCREENSHOTS_DIR")
+    or DEFAULT_SCREENSHOTS_DIR
+)
+DB_DIR = Path(os.getenv("DB_DIR") or locals().get("DB_DIR") or DEFAULT_DB_DIR)
+
+DB_PATH = Path(os.getenv("DB_PATH") or locals().get("DB_PATH") or DB_DIR / "bot.db")
 USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
-SECONDARY_DB_PATH = (
+SECONDARY_DB_PATH = Path(
     os.getenv("SECONDARY_DB_PATH")
-    or r"C:\\Users\\Administrator\\PycharmProjects\\SmenaOplati\\bot.db"
+    or locals().get("SECONDARY_DB_PATH")
+    or DB_DIR / "bot_secondary.db"
 )
 
-PODMENA_DB_PATH = os.path.join(DB_DIR, "podmena.db")
+PODMENA_DB_PATH = DB_DIR / "podmena.db"
 
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
 SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
@@ -483,8 +495,8 @@ def delete_bot_by_token(token: str):
         c.execute("DELETE FROM user_bots WHERE token=?", (token,))
         conn.commit()
 
-    bot_dir = os.path.join(DB_DIR, safe_token_slug(token))
-    if os.path.isdir(bot_dir):
+    bot_dir = DB_DIR / safe_token_slug(token)
+    if bot_dir.is_dir():
         shutil.rmtree(bot_dir, ignore_errors=True)
 
     return bot_record
@@ -521,13 +533,13 @@ async def notify_admins_invalid_bot(token: str, reason: str, owner_id: int | Non
 
 def create_bot_storage(token: str, owner_id: int, title: str | None = None):
     slug = safe_token_slug(token)
-    bot_dir = os.path.join(DB_DIR, slug)
+    bot_dir = DB_DIR / slug
     os.makedirs(bot_dir, exist_ok=True)
-    db_path = os.path.join(bot_dir, "bot.db")
+    db_path = bot_dir / "bot.db"
     init_db(db_path)
     set_setting("bot_owner", str(owner_id), db_path=db_path)
     set_setting("bot_token", token, db_path=db_path)
-    add_user_bot(owner_id, token, db_path, title)
+    add_user_bot(owner_id, token, str(db_path), title)
     logger.info("Создано хранилище для бота %s в %s", token, db_path)
     return db_path
 
@@ -1678,10 +1690,10 @@ async def screenshot_receive(update: Update, context: ContextTypes.DEFAULT_TYPE)
     tg_id = update.effective_user.id
 
     order_id = create_order(tg_id, type_="screenshot", bot_token=context.bot.token)
-    path = os.path.join(SCREENSHOTS_DIR, f"{order_id}.jpg")
+    path = SCREENSHOTS_DIR / f"{order_id}.jpg"
     await file.download_to_drive(path)
 
-    update_order_fields(order_id, screenshot_path=path)
+    update_order_fields(order_id, screenshot_path=str(path))
     context.user_data['order_id'] = order_id
     context.user_data['order_type'] = "screenshot"
     context.user_data['order_data'] = {}
