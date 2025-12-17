@@ -952,6 +952,30 @@ def payment_methods_keyboard(prefix: str, order_id: int | None = None):
         ]
     )
 
+
+async def send_payment_menu(order: dict, bot: Bot):
+    if not order:
+        return
+
+    order_id = order.get("id")
+    base_amount = order.get("base_amount") or order.get("amount") or 0
+    total = order.get("amount") or base_amount
+    tg_id = order.get("tg_id")
+
+    message = (
+        "🧾🎄 Оплата поездки\n"
+        f"🛷 Заказ №{order_id}\n"
+        f"🎁 Стоимость: {base_amount:.2f} ₽\n"
+        f"К оплате: {total:.2f} ₽\n\n"
+        "Выберите удобный способ оплаты:"
+    )
+
+    await bot.send_message(
+        tg_id,
+        message,
+        reply_markup=payment_methods_keyboard("orderpay_", order_id),
+    )
+
 def admin_order_buttons(order_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Взял в работу 🎉", callback_data=f"take_{order_id}"),
@@ -1380,33 +1404,35 @@ def order_confirmation_keyboard():
 
 
 def build_order_preview_text(order_data, order_type):
-    parts = ["Проверьте данные заказа:"]
-    parts.append(f"Тип: {'Скриншот' if order_type == 'screenshot' else 'Текст'}")
+    parts = ["🎄✨ Проверьте данные заказа:"]
+    parts.append(f"📸 Формат: {'🖼️ Скриншот' if order_type == 'screenshot' else '📝 Текст'}")
 
     if order_data.get('city'):
-        parts.append(f"Город: {order_data['city']}")
+        parts.append(f"🏙️ Город: {order_data['city']}")
     if order_data.get('address_from'):
-        parts.append(f"Откуда: {order_data['address_from']}")
+        parts.append(f"🎁 Откуда: {order_data['address_from']}")
     if order_data.get('address_to'):
-        parts.append(f"Куда: {order_data['address_to']}")
+        parts.append(f"🎁 Куда: {order_data['address_to']}")
     if order_data.get('address_extra'):
-        parts.append(f"Доп. адрес: {order_data['address_extra']}")
+        parts.append(f"🧭 Доп. адрес: {order_data['address_extra']}")
     if order_data.get('tariff'):
-        parts.append(f"Тариф: {order_data['tariff']}")
+        parts.append(f"⛄️ Тариф: {order_data['tariff']}")
     if order_data.get('child_seat'):
-        parts.append(f"Детское кресло: {order_data['child_seat']}")
+        parts.append(f"🛷 Детское кресло: {order_data['child_seat']}")
     if order_data.get('child_seat_type'):
-        parts.append(f"Тип кресла: {order_data['child_seat_type']}")
+        parts.append(f"❄️ Тип кресла: {order_data['child_seat_type']}")
     if order_data.get('wishes'):
         wishes = order_data.get('wishes')
         wishes_text = ", ".join(wishes) if isinstance(wishes, (list, tuple, set)) else wishes
-        parts.append(f"Пожелания: {wishes_text}")
+        parts.append(f"🎇 Пожелания: {wishes_text}")
 
     comment = order_data.get('comment')
-    parts.append(f"Комментарий: {comment if comment else 'не указан'}")
+    parts.append(f"📝 Комментарий: {comment if comment else 'не указан'}")
 
     if order_type == "screenshot":
-        parts.append("Скриншот: прикреплён")
+        parts.append("🖼️ Скриншот: прикреплён")
+
+    parts.append("\n✨ Если всё верно — отправляйте заказ!")
 
     return "\n".join(parts)
 
@@ -1904,10 +1930,14 @@ async def notify_admins_payment(context: ContextTypes.DEFAULT_TYPE, payment_id: 
             logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
 
-async def animate_status_message(message, frames: list[str], delay: int = 3):
+async def animate_status_message(
+    message, frames: list[str], delay: int = 4, cycles: int = 3
+):
     """Плавно обновляет текст сообщения для создания вау-эффекта."""
-    for text in frames:
+    total_steps = max(1, cycles) * len(frames)
+    for step in range(total_steps):
         await asyncio.sleep(delay)
+        text = frames[step % len(frames)]
         try:
             await message.edit_text(text)
         except Exception as e:
@@ -1937,17 +1967,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=admin_in_progress_buttons(order_id))
 
         user_id = order.get("tg_id")
-        status_message = await context.bot.send_message(
-            user_id, f"🎄 Ваш заказ №{order_id} взят в работу! 🛷"
-        )
+        status_frames = [
+            "🚕 Уже взяли в работу ваш заказ",
+            "🛠️ Трудимся над вашим заказом",
+            "🚦 Скоро начнём поиск такси",
+        ]
+        status_message = await context.bot.send_message(user_id, status_frames[0])
         context.application.create_task(
-            animate_status_message(
-                status_message,
-                [
-                    f"✨ Мы уже работаем над вашим заказом №{order_id}! ❄️",
-                    f"🎁 Активно занимаемся вашим заказом №{order_id}! ⛄️",
-                ],
-            )
+            animate_status_message(status_message, status_frames)
         )
 
         # удаляем сообщение у других админов
@@ -1973,35 +2000,51 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=admin_search_buttons(order_id))
         order = get_order(order_id)
         user_id = order.get("tg_id")
-        search_message = await context.bot.send_message(
-            user_id,
-            f"🎄 Начинаем поиск такси для вашего заказа №{order_id}! 🛷",
-        )
+        search_frames = [
+            "🔍 Поиск машины",
+            "🚗 Ищем вам машину",
+            "🚕 Поиск такси",
+        ]
+        search_message = await context.bot.send_message(user_id, search_frames[0])
         context.application.create_task(
-            animate_status_message(
-                search_message,
-                [
-                    f"✨ Мы подбираем лучшее предложение для заказа №{order_id}! ❄️",
-                    f"🎆 Активно ищем такси для заказа №{order_id}! 🎁",
-                ],
-            )
+            animate_status_message(search_message, search_frames)
         )
     # Отмена поиска / заказ
     elif data.startswith("cancel_") or data.startswith("cancelsearch_"):
         order_id = int(data.split("_")[1])
+        order = get_order(order_id)
+        if not order:
+            await query.answer("Заказ не найден", show_alert=True)
+            return ConversationHandler.END
+
         update_order_status(order_id, "cancelled")
         await query.edit_message_text("Заказ отменён 🎄🚫")
-        order = get_order(order_id)
         user_id = order.get("tg_id")
         await context.bot.send_message(user_id, f"Ваш заказ №{order_id} отменён ❄️")
+
+        for admin_id in ADMIN_IDS:
+            if admin_id != query.from_user.id:
+                try:
+                    await context.bot.delete_message(
+                        chat_id=admin_id, message_id=query.message.message_id
+                    )
+                except Exception:
+                    pass
     # Нашлась машина
     elif data.startswith("found_"):
         order_id = int(data.split("_")[1])
         context.user_data['order_id'] = order_id
         order = get_order(order_id)
         tg_id = order.get("tg_id")
-        await context.bot.send_message(tg_id,
-                                       f"🛷 Ваш заказ №{order_id} нашёл машину! Пожалуйста, ожидайте инструкций от администратора.")
+        found_frames = [
+            "✅ Машина успешно найдена",
+            "📨 Сейчас отправим вам ссылку на машину",
+            "🛣️ Машина едет к вам",
+        ]
+        found_message = await context.bot.send_message(tg_id, found_frames[0])
+        context.application.create_task(
+            animate_status_message(found_message, found_frames)
+        )
         await query.message.reply_text("Введите сообщение пользователю:")
         return WAIT_ADMIN_MESSAGE
 
@@ -2016,21 +2059,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not order:
             await query.answer("Заказ не найден", show_alert=True)
             return ConversationHandler.END
-        base_amount = order.get("base_amount") or order.get("amount") or 0
-        tg_id = order.get("tg_id")
-        total = order.get("amount") or base_amount
-        message = (
-            "🧾🎄 Оплата поездки\n"
-            f"🛷 Заказ №{order_id}\n"
-            f"🎁 Стоимость: {base_amount:.2f} ₽\n"
-            f"К оплате: {total:.2f} ₽\n\n"
-            "Выберите удобный способ оплаты:"
-        )
-        await context.bot.send_message(
-            tg_id,
-            message,
-            reply_markup=payment_methods_keyboard("orderpay_", order_id),
-        )
+        await send_payment_menu(order, context.bot)
         await query.message.reply_text("Меню оплаты отправлено клиенту")
     elif data.startswith("replacement_offer_add_"):
         order_id = int(data.rsplit("_", 1)[1])
@@ -2394,6 +2423,10 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     update_order_fields(order_id, status="car_found", amount=total, base_amount=amount)
 
+    updated_order = dict(order or {})
+    updated_order.update({"id": order_id, "amount": total, "base_amount": amount})
+    await send_payment_menu(updated_order, context.bot)
+
     bot_token = order.get("bot_token") or PRIMARY_BOT_TOKEN
     bot_record = get_bot_by_token(bot_token)
     if bot_record and bot_record.get("owner_id"):
@@ -2414,7 +2447,7 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Не удалось уведомить владельца бота о заказе {order_id}: {e}")
 
     await update.message.reply_text(
-        f"🎉 Сумма заказа сохранена. Итог для клиента: {total:.2f} ₽",
+        f"🎉 Сумма заказа сохранена. Итог для клиента: {total:.2f} ₽. Меню оплаты отправлено клиенту",
         reply_markup=payment_choice_keyboard(order_id),
     )
 
