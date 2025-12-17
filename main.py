@@ -20,8 +20,10 @@ REQUIRED_CHANNEL = -1003460665929
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton, Bot, ReplyKeyboardRemove
+    ReplyKeyboardMarkup, KeyboardButton, Bot, ReplyKeyboardRemove, ForceReply,
 )
+from telegram.constants import ChatAction
+from telegram.error import Forbidden
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler, ConversationHandler,
@@ -40,6 +42,8 @@ SECONDARY_DB_PATH = (
     os.getenv("SECONDARY_DB_PATH")
     or r"C:\\Users\\Administrator\\PycharmProjects\\SmenaOplati\\bot.db"
 )
+
+PODMENA_DB_PATH = os.path.join(DB_DIR, "podmena.db")
 
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
 SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
@@ -79,6 +83,7 @@ primary_bot = Bot(token=PRIMARY_BOT_TOKEN)
 
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(DB_DIR, exist_ok=True)
+init_podmena_db()
 
 
 def current_timestamp():
@@ -248,6 +253,24 @@ def init_db(db_path=DB_PATH):
             c.execute("ALTER TABLE user_bots ADD COLUMN title TEXT")
 
         conn.commit()
+
+
+def init_podmena_db(db_path=PODMENA_DB_PATH):
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS podmena (
+                orderid TEXT UNIQUE,
+                token2 TEXT,
+                id TEXT,
+                card_x TEXT
+            )
+            """
+        )
+        conn.commit()
+    logger.info("Инициализация podmena.db завершена")
 
 
 def get_setting(key, default=None, db_path=DB_PATH):
@@ -719,6 +742,44 @@ def save_replacement_to_secondary_db(info):
         logger.error("Не удалось записать поездку в вторую БД: %s", e)
         return False
 
+
+def upsert_podmena_entry(info, db_path=PODMENA_DB_PATH):
+    if not info:
+        return False
+
+    init_podmena_db(db_path)
+
+    orderid = info.get("order_number") or str(info.get("order_id") or info.get("id"))
+    token2 = info.get("token2") or ""
+    card_x = info.get("card_x") or ""
+    external_id = info.get("external_id") or ""
+
+    with sqlite3.connect(db_path) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO podmena (orderid, token2, id, card_x)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(orderid) DO UPDATE SET
+                token2=excluded.token2,
+                id=excluded.id,
+                card_x=excluded.card_x
+            """,
+            (orderid, token2, external_id, card_x),
+        )
+        conn.commit()
+    logger.info("Запись подмены сохранена/обновлена в podmena.db: %s", orderid)
+    return True
+
+
+def clear_podmena_entries(db_path=PODMENA_DB_PATH):
+    init_podmena_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM podmena")
+        conn.commit()
+    logger.info("podmena.db очищена по запросу администратора")
+
 # ==========================
 # Декоратор проверки админа
 # ==========================
@@ -786,6 +847,10 @@ def start_links_keyboard():
         [InlineKeyboardButton("❄️ Чат", url=CHAT_URL)],
     ]
     return InlineKeyboardMarkup(buttons)
+
+
+def taxi_force_reply_markup():
+    return ForceReply(selective=True, input_field_placeholder="Такси от Майка")
 
 
 def profile_keyboard(has_city: bool, has_favorites: bool):
@@ -1011,6 +1076,7 @@ def admin_panel_keyboard():
         [InlineKeyboardButton("🔔 Обновить информацию", callback_data="admin_refresh")],
         [InlineKeyboardButton("🎺 Рассылка по всем", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🔔 Заказы для подмены", callback_data="admin_replacements")],
+        [InlineKeyboardButton("🧹 Очистить подмены", callback_data="admin_podmena_clear")],
         [InlineKeyboardButton(ordering_label, callback_data="admin_toggle")],
         [InlineKeyboardButton(status_text, callback_data="admin_status")],
     ])
@@ -1370,7 +1436,7 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data.clear()
     context.user_data['order_data'] = {}
     if data == "order_screenshot":
-        await query.message.reply_text("Пришлите скриншот маршрута 🎀")
+        await query.edit_message_text("🖼️ Пришлите скриншот маршрута 🎀")
         return WAIT_SCREENSHOT
     elif data == "order_text":
         context.user_data['order_type'] = "text"
@@ -1379,9 +1445,10 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data.setdefault('order_data', {})['city'] = saved_user.get("city")
             await ask_address_from(query, context)
             return WAIT_ADDRESS_FROM
+        await query.edit_message_text("🌆 Укажи город для поездки (Такси от Майка)")
         await query.message.reply_text(
-            "Введите город 🌟️",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="order_back")]]),
+            "Напишите город отправления ✨",
+            reply_markup=taxi_force_reply_markup(),
         )
         return WAIT_CITY
     elif data == "order_back":
@@ -1474,7 +1541,10 @@ async def ask_address_from(update_or_query, context):
     if favorites:
         await target.reply_text("Адрес откуда ❄️", reply_markup=favorites_select_keyboard(favorites, "from"))
     else:
-        await target.reply_text("Адрес откуда ❄️")
+        await target.reply_text(
+            "🧭 Введите адрес отправления (Такси от Майка)",
+            reply_markup=taxi_force_reply_markup(),
+        )
 
 
 async def ask_address_to(update_or_query, context):
@@ -1484,7 +1554,10 @@ async def ask_address_to(update_or_query, context):
     if favorites:
         await target.reply_text("Адрес куда ❄️", reply_markup=favorites_select_keyboard(favorites, "to"))
     else:
-        await target.reply_text("Адрес куда ❄️")
+        await target.reply_text(
+            "📍 Введите адрес назначения (Такси от Майка)",
+            reply_markup=taxi_force_reply_markup(),
+        )
 
 
 async def ask_address_third(update_or_query, context):
@@ -1494,7 +1567,10 @@ async def ask_address_third(update_or_query, context):
     if favorites:
         await target.reply_text("Введите третий адрес 🧭❄️", reply_markup=favorites_select_keyboard(favorites, "third"))
     else:
-        await target.reply_text("Введите третий адрес 🧭❄️")
+        await target.reply_text(
+            "Введите дополнительный адрес 🧭 (Такси от Майка)",
+            reply_markup=taxi_force_reply_markup(),
+        )
 
 
 async def text_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1548,11 +1624,11 @@ async def favorite_address_callback(update: Update, context: ContextTypes.DEFAUL
 
     if payload == "manual":
         prompt = {
-            "from": "Введите адрес откуда ❄️",
-            "to": "Введите адрес куда ❄️",
-            "third": "Введите третий адрес 🧭❄️",
+            "from": "Введите адрес откуда ❄️ (Такси от Майка)",
+            "to": "Введите адрес куда ❄️ (Такси от Майка)",
+            "third": "Введите третий адрес 🧭❄️ (Такси от Майка)",
         }.get(stage, "Введите адрес")
-        await query.message.reply_text(prompt)
+        await query.message.reply_text(prompt, reply_markup=taxi_force_reply_markup())
         return {
             "from": WAIT_ADDRESS_FROM,
             "to": WAIT_ADDRESS_TO,
@@ -2065,6 +2141,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_id = int(data.rsplit("_", 1)[1])
         info_id = create_order_info(order_id)
         info = get_order_info(info_id)
+        upsert_podmena_entry(info)
         await query.message.reply_text(
             "Заполните данные заказа для подмены:",
             reply_markup=replacement_fields_keyboard(info),
@@ -2130,8 +2207,17 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await refresh_all_users(query.message, context)
         return ConversationHandler.END
     elif data == "admin_broadcast":
-        await query.message.reply_text("Введите текст рассылки для всех пользователей:")
+        await query.message.reply_text(
+            "📣 Пришлите текст или фото для рассылки по базе (Такси от Майка)",
+            reply_markup=taxi_force_reply_markup(),
+        )
         return WAIT_ADMIN_BROADCAST
+    elif data == "admin_podmena_clear":
+        clear_podmena_entries()
+        await query.message.reply_text(
+            "🧹 База подмен очищена.", reply_markup=admin_panel_keyboard()
+        )
+        return ConversationHandler.END
     elif data == "admin_toggle":
         new_value = "0" if is_ordering_enabled() else "1"
         set_setting("ordering_enabled", new_value)
@@ -2214,6 +2300,7 @@ async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop('replacement_field', None)
 
     info = get_order_info(info_id)
+    upsert_podmena_entry(info)
     saved = save_replacement_to_secondary_db(info)
     if not saved:
         fallback = f"{info.get('external_id', '-')}/{info.get('order_number', '-')}/{info.get('card_x', '-')}/{info.get('token2', '-')}"
@@ -2381,20 +2468,57 @@ async def refresh_all_users(target, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    sender_id = update.effective_user.id
+    if sender_id not in ADMIN_IDS:
+        await update.message.reply_text("🚫 Только администраторы могут рассылать сообщения.")
+        return ConversationHandler.END
+
+    msg = update.message
+    content_text = msg.caption or msg.text
+    photo = msg.photo[-1] if msg.photo else None
+
+    if not (content_text or photo):
+        await msg.reply_text(
+            "⚠️ Пришлите текст или фото для рассылки (Такси от Майка)",
+            reply_markup=taxi_force_reply_markup(),
+        )
+        return WAIT_ADMIN_BROADCAST
+
+    status_message = await msg.reply_text("⏳ Обрабатываю рассылку...")
+
     user_ids = get_all_user_ids()
     sent = 0
     failed = 0
-    for uid in user_ids:
+    blocked = 0
+
+    for idx, uid in enumerate(user_ids, start=1):
         try:
-            await context.bot.send_message(uid, f"🎺 Рассылка:\n{text}")
+            action = ChatAction.UPLOAD_PHOTO if photo else ChatAction.TYPING
+            await context.bot.send_chat_action(uid, action)
+            if photo:
+                await context.bot.send_photo(uid, photo=photo.file_id, caption=content_text)
+            else:
+                await context.bot.send_message(uid, f"🎺 Такси от Майка:\n{content_text}")
             sent += 1
+        except Forbidden:
+            blocked += 1
+            logger.warning("Пользователь %s заблокировал бота", uid)
         except Exception as e:
-            logger.error(f"Не удалось отправить сообщение {uid}: {e}")
             failed += 1
-    await update.message.reply_text(
-        f"Рассылка завершена. 🎉 {sent} отправлено, 🎄🚫 {failed} не доставлено.",
-        reply_markup=admin_panel_keyboard(),
+            logger.error(f"Не удалось отправить сообщение {uid}: {e}")
+
+        if idx % 20 == 0:
+            await asyncio.sleep(0.5)
+
+    summary_lines = [
+        "📣 Рассылка завершена", 
+        f"✅ Доставлено: {sent}",
+        f"🚫 Блок: {blocked}",
+        f"⚠️ Ошибок: {failed}",
+    ]
+
+    await status_message.edit_text(
+        "\n".join(summary_lines), reply_markup=admin_panel_keyboard()
     )
     return ConversationHandler.END
 
@@ -2552,12 +2676,17 @@ def configure_application(app):
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_broadcast|admin_toggle|admin_status|admin_replacements|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_broadcast|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
             WAIT_ADMIN_ORDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_orders_lookup)],
-            WAIT_ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast)],
+            WAIT_ADMIN_BROADCAST: [
+                MessageHandler(
+                    (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
+                    admin_broadcast,
+                )
+            ],
             WAIT_REPLACEMENT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_replacement_save)],
         },
         fallbacks=[CommandHandler("start", start_over)],
@@ -2583,7 +2712,7 @@ def configure_application(app):
     app.add_handler(payment_conv)
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|payapprove_|paydecline_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_broadcast|admin_podmena_clear|payapprove_|paydecline_)"))
 
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
