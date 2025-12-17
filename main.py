@@ -20,7 +20,7 @@ REQUIRED_CHANNEL = -1003460665929
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton, Bot
+    ReplyKeyboardMarkup, KeyboardButton, Bot, ReplyKeyboardRemove
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -577,6 +577,13 @@ def update_order_fields(order_id, **fields):
             f"UPDATE orders SET {placeholders}, updated_at=? WHERE id=?",
             values,
         )
+        conn.commit()
+
+
+def delete_order(order_id):
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM orders WHERE id=?", (order_id,))
         conn.commit()
 
 
@@ -1300,13 +1307,14 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_ADDITIONAL,
     WAIT_CHILD_SEAT_TYPE,
     WAIT_COMMENT,
+    WAIT_ORDER_CONFIRM,
     WAIT_REPLACEMENT_FIELD,
     WAIT_ADMIN_MESSAGE,
     WAIT_ADMIN_SUM,
     WAIT_ADMIN_ORDERS,
     WAIT_ADMIN_BROADCAST,
     WAIT_PAYMENT_PROOF,
-) = range(16)
+) = range(17)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -1356,6 +1364,57 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ---- Клавиатура "Пропустить" ----
 def skip_keyboard():
     return ReplyKeyboardMarkup([[KeyboardButton("Пропустить 🎿")]], resize_keyboard=True)
+
+
+def order_confirmation_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Отправить", callback_data="order_confirm_send")],
+        [InlineKeyboardButton("Отменить", callback_data="order_confirm_cancel")],
+    ])
+
+
+def build_order_preview_text(order_data, order_type):
+    parts = ["Проверьте данные заказа:"]
+    parts.append(f"Тип: {'Скриншот' if order_type == 'screenshot' else 'Текст'}")
+
+    if order_data.get('city'):
+        parts.append(f"Город: {order_data['city']}")
+    if order_data.get('address_from'):
+        parts.append(f"Откуда: {order_data['address_from']}")
+    if order_data.get('address_to'):
+        parts.append(f"Куда: {order_data['address_to']}")
+    if order_data.get('address_extra'):
+        parts.append(f"Доп. адрес: {order_data['address_extra']}")
+    if order_data.get('tariff'):
+        parts.append(f"Тариф: {order_data['tariff']}")
+    if order_data.get('child_seat'):
+        parts.append(f"Детское кресло: {order_data['child_seat']}")
+    if order_data.get('child_seat_type'):
+        parts.append(f"Тип кресла: {order_data['child_seat_type']}")
+    if order_data.get('wishes'):
+        wishes = order_data.get('wishes')
+        wishes_text = ", ".join(wishes) if isinstance(wishes, (list, tuple, set)) else wishes
+        parts.append(f"Пожелания: {wishes_text}")
+
+    comment = order_data.get('comment')
+    parts.append(f"Комментарий: {comment if comment else 'не указан'}")
+
+    if order_type == "screenshot":
+        parts.append("Скриншот: прикреплён")
+
+    return "\n".join(parts)
+
+
+async def send_order_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    order_data = context.user_data.get('order_data', {})
+    order_type = context.user_data.get('order_type', 'text')
+    text = build_order_preview_text(order_data, order_type)
+
+    if update.message:
+        await update.message.reply_text("Комментарий сохранён.", reply_markup=ReplyKeyboardRemove())
+        await update.message.reply_text(text, reply_markup=order_confirmation_keyboard())
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(text, reply_markup=order_confirmation_keyboard())
 
 # ---- Скриншотный заказ (приём фото) ----
 async def screenshot_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1492,9 +1551,8 @@ async def favorite_address_callback(update: Update, context: ContextTypes.DEFAUL
     return ConversationHandler.END
 
 async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    comment = update.message.text
-    if comment and comment.lower() == "пропустить 🎿":
-        comment = None
+    raw_comment = (update.message.text or "").strip()
+    comment = None if raw_comment.lower() == "пропустить 🎿" or raw_comment == "" else raw_comment
 
     order_type = context.user_data.get('order_type')
     data = context.user_data.get('order_data', {})
@@ -1513,40 +1571,75 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
             return ConversationHandler.END
 
+    await send_order_preview(update, context)
+    return WAIT_ORDER_CONFIRM
 
+
+async def order_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    action = query.data
+    order_type = context.user_data.get('order_type')
+    data = context.user_data.get('order_data', {})
+
+    if action == "order_confirm_cancel":
+        order_id = context.user_data.get('order_id')
+        if order_type == "screenshot" and order_id:
+            order = get_order(order_id)
+            screenshot_path = order.get("screenshot_path") if order else None
+            if screenshot_path and os.path.exists(screenshot_path):
+                os.remove(screenshot_path)
+            delete_order(order_id)
+
+        context.user_data.clear()
+        await query.message.reply_text(
+            "Заказ отменён. Возвращаю в главное меню.",
+            reply_markup=main_menu_keyboard(query.from_user.id),
+        )
+        return ConversationHandler.END
+
+    if action != "order_confirm_send":
+        return WAIT_ORDER_CONFIRM
+
+    comment = data.get('comment')
+    wishes = data.get('wishes')
+    wishes_text = ", ".join(wishes) if isinstance(wishes, (list, tuple, set)) else wishes
+
+    if order_type == "text":
         order_id = create_order(
-            tg_id=update.effective_user.id,
+            tg_id=query.from_user.id,
             type_="text",
             bot_token=context.bot.token,
-            city=city,
-            address_from=addr_from,
-            address_to=addr_to,
+            city=data.get('city'),
+            address_from=data.get('address_from'),
+            address_to=data.get('address_to'),
             address_extra=data.get('address_extra'),
             tariff=data.get('tariff'),
             child_seat=data.get('child_seat'),
             child_seat_type=data.get('child_seat_type'),
-            wishes=", ".join(data.get('wishes', [])) if data.get('wishes') else None,
+            wishes=wishes_text,
             comment=comment,
         )
-
     else:
         order_id = context.user_data.get('order_id')
         if not order_id:
-            await update.message.reply_text("Произошла ошибка: заказ не найден.")
+            await query.message.reply_text("Произошла ошибка: заказ не найден.")
+            context.user_data.clear()
             return ConversationHandler.END
         update_order_fields(
             order_id,
             tariff=data.get('tariff'),
             child_seat=data.get('child_seat'),
             child_seat_type=data.get('child_seat_type'),
-            wishes=", ".join(data.get('wishes', [])) if data.get('wishes') else None,
+            wishes=wishes_text,
             comment=comment,
         )
 
-    increment_orders_count(update.effective_user.id)
-    await update.message.reply_text(
+    increment_orders_count(query.from_user.id)
+    await query.message.reply_text(
         f"🎉 Ваш заказ №{order_id} создан",
-        reply_markup=main_menu_keyboard(update.effective_user.id),
+        reply_markup=main_menu_keyboard(query.from_user.id),
     )
     await notify_admins(context, order_id)
 
@@ -2368,6 +2461,7 @@ def configure_application(app):
             WAIT_ADDITIONAL: [CallbackQueryHandler(additional_selected, pattern="^additional_")],
             WAIT_CHILD_SEAT_TYPE: [CallbackQueryHandler(child_seat_type_selected, pattern="^seat_type_")],
             WAIT_COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_comment)],
+            WAIT_ORDER_CONFIRM: [CallbackQueryHandler(order_confirmation, pattern="^order_confirm_")],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
