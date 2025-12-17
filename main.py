@@ -1,14 +1,20 @@
 from cfg import *
 import os
+import sys
 import asyncio
 import sqlite3
 import logging
 import requests
 import random
 import time
+import warnings
 from datetime import datetime
 from functools import wraps
 
+
+DEFAULT_CHANNEL_URL = "https://t.me/TaxiFromMike"
+DEFAULT_OPERATOR_URL = "https://t.me/TakeMaxist"
+DEFAULT_CHAT_URL = "https://t.me/+z_S1iZMVW-ZmMzBi"
 
 REQUIRED_CHANNEL = -1003460665929
 
@@ -19,8 +25,8 @@ from telegram import (
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler, ConversationHandler,
-    ApplicationHandlerStop,
 )
+from telegram.warnings import PTBUserWarning
 
 TOKEN = os.getenv("BOT_TOKEN") or TOKEN
 PRIMARY_BOT_TOKEN = locals().get("PRIMARY_BOT_TOKEN") or os.getenv("PRIMARY_BOT_TOKEN") or TOKEN
@@ -34,8 +40,6 @@ SECONDARY_DB_PATH = (
     os.getenv("SECONDARY_DB_PATH")
     or r"C:\\Users\\Administrator\\PycharmProjects\\SmenaOplati\\bot.db"
 )
-
-CURRENT_BOT_TOKEN = TOKEN
 
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
 SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
@@ -56,12 +60,17 @@ USDT_TRX_WALLET = (
     or "TJRe5tyJXMDp7PkUhKN97SQjpV2PR5VRR2"
 ).strip()
 
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
+warnings.filterwarnings("ignore", category=PTBUserWarning)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("bot.log"),
-        logging.StreamHandler(),
+        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
     ],
 )
 logger = logging.getLogger(__name__)
@@ -76,11 +85,9 @@ def current_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def required_channel_link() -> str:
-    channel_id = str(REQUIRED_CHANNEL)
-    if channel_id.startswith("-100") and channel_id[4:].isdigit():
-        return f"https://t.me/TaxiFromMike"
-    return f"https://t.me/TaxiFromMike"
+CHANNEL_URL = (os.getenv("CHANNEL_URL") or DEFAULT_CHANNEL_URL).strip()
+OPERATOR_URL = (os.getenv("OPERATOR_URL") or DEFAULT_OPERATOR_URL).strip()
+CHAT_URL = (os.getenv("CHAT_URL") or DEFAULT_CHAT_URL).strip()
 
 # ==========================
 # Инициализация БД
@@ -360,6 +367,14 @@ def list_user_bots(owner_id: int):
         return [dict(row) for row in c.fetchall()]
 
 
+def list_all_bots():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM user_bots ORDER BY created_at DESC")
+        return [dict(row) for row in c.fetchall()]
+
+
 def delete_user_bot(bot_id: int, owner_id: int):
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
@@ -377,9 +392,7 @@ def get_bot_by_token(token: str):
 
 
 def create_bot_storage(token: str, owner_id: int, title: str | None = None):
-    folder = os.path.join(DB_DIR, "user_bots", f"bot_{int(time.time())}")
-    os.makedirs(folder, exist_ok=True)
-    db_path = os.path.join(folder, "bot.db")
+    db_path = DB_PATH
     init_db(db_path)
     set_setting("bot_owner", str(owner_id), db_path=db_path)
     set_setting("bot_token", token, db_path=db_path)
@@ -507,7 +520,7 @@ def create_order(
             """,
             (
                 tg_id,
-                bot_token or CURRENT_BOT_TOKEN,
+                bot_token or PRIMARY_BOT_TOKEN,
                 type_,
                 screenshot_path,
                 city,
@@ -713,102 +726,29 @@ def admin_only(func):
 
 
 def subscription_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("🎄 Проверить", callback_data="check_subscription"),
-                InlineKeyboardButton("🎁 Подписаться", url=required_channel_link()),
-            ]
-        ]
-    )
+    return InlineKeyboardMarkup([])
 
 
 async def send_subscription_prompt(
     update: Update, context: ContextTypes.DEFAULT_TYPE, message: str | None = None
 ):
-    target = update.effective_message or (
-        update.callback_query and update.callback_query.message
-    )
-    text = (
-        message
-        or "❄️✨ Подпишитесь на наш зимний канал и нажмите «🎄 Проверить», чтобы вернуться к волшебному меню!"
-    )
-    if target:
-        await target.reply_text(text, reply_markup=subscription_keyboard())
-    else:
-        user = update.effective_user
-        if user:
-            await context.bot.send_message(
-                chat_id=user.id,
-                text=text,
-                reply_markup=subscription_keyboard(),
-            )
+    return None
 
 
 async def ensure_subscription(
     update: Update, context: ContextTypes.DEFAULT_TYPE, silent: bool = False
 ) -> bool:
-    if context.user_data.get("subscription_verified"):
-        return True
-    if not REQUIRED_CHANNEL:
-        return True
-    user = update.effective_user
-    if not user:
-        return False
-    try:
-        member = await context.bot.get_chat_member(REQUIRED_CHANNEL, user.id)
-        if member.status in {"left", "kicked"}:
-            raise ValueError("not subscribed")
-    except Exception:
-        if not silent:
-            await send_subscription_prompt(update, context)
-        return False
-    context.user_data["subscription_verified"] = True
     return True
 
 
 async def subscription_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    is_subscribed = await ensure_subscription(update, context, silent=True)
-    is_start_command = (
-        update.effective_message
-        and update.effective_message.text
-        and update.effective_message.text.startswith("/start")
-    )
-
-    if is_subscribed:
-        if is_start_command:
-            await start(update, context)
-            raise ApplicationHandlerStop
-        return
-
-    await send_subscription_prompt(update, context)
-    if is_start_command:
-        raise ApplicationHandlerStop
-    raise ApplicationHandlerStop
+    return
 
 
 async def check_subscription_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    query = update.callback_query
-    if query:
-        await query.answer()
-
-    if await ensure_subscription(update, context, silent=True):
-        context.user_data["subscription_verified"] = True
-        if query and query.message:
-            await query.message.edit_text(
-                "🎉❄️ Подписка подтверждена! Возвращаем вас в праздничное меню.",
-                reply_markup=None,
-            )
-        await start(update, context)
-        return
-
-    await send_subscription_prompt(
-        update,
-        context,
-        "❄️ Подписка пока не найдена. Перейдите в канал и попробуйте снова.",
-    )
+    return
 
 # ==========================
 # Клавиатуры
@@ -825,6 +765,17 @@ def main_menu_keyboard(user_id=None):
 
 def back_keyboard():
     return ReplyKeyboardMarkup([[KeyboardButton("Назад 🎄")]], resize_keyboard=True)
+
+
+def start_links_keyboard():
+    buttons = [
+        [
+            InlineKeyboardButton("🎄 Канал", url=CHANNEL_URL),
+            InlineKeyboardButton("✨ Оператор", url=OPERATOR_URL),
+        ],
+        [InlineKeyboardButton("❄️ Чат", url=CHAT_URL)],
+    ]
+    return InlineKeyboardMarkup(buttons)
 
 
 def profile_keyboard(has_city: bool, has_favorites: bool):
@@ -1049,8 +1000,6 @@ def not_banned(func):
                 if target:
                     await target.reply_text("🎄🚫 Вы заблокированы и не можете использовать бота.")
                 return
-        if not await ensure_subscription(update, context):
-            return
         return await func(update, context)
     return wrapper
 
@@ -1063,12 +1012,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if target:
         await target.reply_text(
             f"🎄 Привет, @{user.username or 'не указан'}! Добро пожаловать в сказочный сервис заказа такси 🎆🛷",
-            reply_markup=main_menu_keyboard(user.id),
+            reply_markup=start_links_keyboard(),
+        )
+        await target.reply_text(
+            "🎁 Главное меню готово к волшебству!", reply_markup=main_menu_keyboard(user.id)
         )
     else:
         await context.bot.send_message(
             chat_id=user.id,
             text=f"🎄 Привет, @{user.username or 'не указан'}! Добро пожаловать в сказочный сервис заказа такси 🎆🛷",
+            reply_markup=start_links_keyboard(),
+        )
+        await context.bot.send_message(
+            chat_id=user.id,
+            text="🎁 Главное меню готово к волшебству!",
             reply_markup=main_menu_keyboard(user.id),
         )
 
@@ -1243,8 +1200,6 @@ async def build_and_send_payment(user_id: int, method: str, amount: float | None
 async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not await ensure_subscription(update, context):
-        return ConversationHandler.END
     data = query.data
     user_id = query.from_user.id
 
@@ -1367,8 +1322,6 @@ async def order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not await ensure_subscription(update, context):
-        return ConversationHandler.END
     if not is_ordering_enabled():
         await query.message.reply_text(
             "🔔 Заказ такси временно недоступен. Бот на технических работах, попробуйте позже.",
@@ -1410,7 +1363,7 @@ async def screenshot_receive(update: Update, context: ContextTypes.DEFAULT_TYPE)
     file = await photo.get_file()
     tg_id = update.effective_user.id
 
-    order_id = create_order(tg_id, type_="screenshot")
+    order_id = create_order(tg_id, type_="screenshot", bot_token=context.bot.token)
     path = os.path.join(SCREENSHOTS_DIR, f"{order_id}.jpg")
     await file.download_to_drive(path)
 
@@ -1564,6 +1517,7 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_id = create_order(
             tg_id=update.effective_user.id,
             type_="text",
+            bot_token=context.bot.token,
             city=city,
             address_from=addr_from,
             address_to=addr_to,
@@ -2382,27 +2336,16 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==========================
-# Основной запуск
+# Запуск нескольких ботов
 # ==========================
-def main():
-    init_db()
-    add_user_bot(0, PRIMARY_BOT_TOKEN, DB_PATH, "Основной бот")
-    app = ApplicationBuilder().token(TOKEN).build()
+RUNNING_BOTS: dict[str, asyncio.Task] = {}
 
-    app.add_handler(
-        MessageHandler(filters.ALL, subscription_gate),
-        group=0,
-    )
-    app.add_handler(
-        CallbackQueryHandler(check_subscription_callback, pattern="^check_subscription$"),
-        group=0,
-    )
 
+def configure_application(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("ban", ban_user))
 
-    # ConversationHandler для заказов и админа
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(order_type_callback, pattern="^order_")],
         states={
@@ -2428,6 +2371,7 @@ def main():
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
+        per_message=False,
     )
 
     admin_conv_handler = ConversationHandler(
@@ -2441,6 +2385,7 @@ def main():
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
+        per_message=False,
     )
 
     payment_conv = ConversationHandler(
@@ -2453,6 +2398,7 @@ def main():
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
+        per_message=False,
     )
 
     app.add_handler(conv_handler)
@@ -2462,13 +2408,9 @@ def main():
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|payapprove_|paydecline_)"))
 
-    # Меню пользователя
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         user_id = update.effective_user.id
-
-        if not await ensure_subscription(update, context):
-            return
 
         if context.user_data.get("awaiting_city"):
             city = text.strip()
@@ -2493,12 +2435,10 @@ def main():
             except Exception:
                 await update.message.reply_text("Не удалось проверить токен. Убедитесь, что он корректен.")
                 return
-
             title = info.get("username") or info.get("first_name")
-            db_path = create_bot_storage(token, user_id, title)
-            await update.message.reply_text(
-                f"Бот подключён: {title or 'без имени'}. База данных создана по пути: {db_path}"
-            )
+            create_bot_storage(token, user_id, title)
+            await ensure_bot_running(token)
+            await update.message.reply_text("🤖 Бот успешно подключён! ✨")
             await send_profile_info(update.message, user_id, context)
             return
 
@@ -2542,12 +2482,49 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # CallbackQueryHandler для админа
-    #app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|found_|chat_)"))
 
-    logger.info("Бот запущен")
-    app.run_polling()
+async def launch_bot(token: str):
+    app = ApplicationBuilder().token(token).build()
+    configure_application(app)
+    try:
+        logger.info("🤖 Бот запущен")
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            logger.info("🛑 Остановка бота")
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
+            raise
+    finally:
+        RUNNING_BOTS.pop(token, None)
+
+
+async def ensure_bot_running(token: str):
+    if token in RUNNING_BOTS:
+        return
+    loop = asyncio.get_running_loop()
+    RUNNING_BOTS[token] = loop.create_task(launch_bot(token))
+
+
+async def main_async():
+    init_db()
+    add_user_bot(0, PRIMARY_BOT_TOKEN, DB_PATH, "Основной бот")
+    tokens = {TOKEN, PRIMARY_BOT_TOKEN}
+    for bot in list_all_bots():
+        if bot.get("token"):
+            tokens.add(bot.get("token"))
+
+    for token in tokens:
+        await ensure_bot_running(token)
+
+    if RUNNING_BOTS:
+        await asyncio.gather(*RUNNING_BOTS.values())
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())
