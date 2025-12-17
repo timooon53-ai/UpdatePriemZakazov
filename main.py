@@ -8,6 +8,7 @@ import requests
 import random
 import time
 import warnings
+import shutil
 from datetime import datetime
 from functools import wraps
 
@@ -23,7 +24,7 @@ from telegram import (
     ReplyKeyboardMarkup, KeyboardButton, Bot, ReplyKeyboardRemove, ForceReply,
 )
 from telegram.constants import ChatAction
-from telegram.error import Forbidden
+from telegram.error import Forbidden, InvalidToken
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler, ConversationHandler,
@@ -473,6 +474,49 @@ def get_bot_by_token(token: str):
         c.execute("SELECT * FROM user_bots WHERE token=?", (token,))
         row = c.fetchone()
         return dict(row) if row else None
+
+
+def delete_bot_by_token(token: str):
+    bot_record = get_bot_by_token(token)
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM user_bots WHERE token=?", (token,))
+        conn.commit()
+
+    bot_dir = os.path.join(DB_DIR, safe_token_slug(token))
+    if os.path.isdir(bot_dir):
+        shutil.rmtree(bot_dir, ignore_errors=True)
+
+    return bot_record
+
+
+async def notify_admins_invalid_bot(token: str, reason: str, owner_id: int | None = None):
+    try:
+        admin_bot = Bot(token=PRIMARY_BOT_TOKEN)
+    except Exception as e:
+        logger.error("Не удалось создать бот для уведомления админов: %s", e)
+        return
+
+    owner_hint = ""
+    if owner_id:
+        owner_info = get_user(owner_id)
+        if owner_info and owner_info.get("username"):
+            owner_hint = f"\n👤 Владелец: @{owner_info['username']}"
+        else:
+            owner_hint = f"\n👤 Владелец: {owner_id}"
+
+    text = (
+        "⚠️ Ошибка запуска подключённого бота\n"
+        f"🔑 Токен: {token}\n"
+        f"🚫 Причина: {reason}{owner_hint}\n"
+        "Токен удалён из базы, работа продолжается."
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await admin_bot.send_message(admin_id, text)
+        except Exception as send_error:
+            logger.error("Не удалось отправить уведомление админу %s: %s", admin_id, send_error)
 
 
 def create_bot_storage(token: str, owner_id: int, title: str | None = None):
@@ -2642,7 +2686,12 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for bot_record in bots:
         token = bot_record.get("token")
         db_path = bot_record.get("db_path") or DB_PATH
-        bot_instance = Bot(token=token)
+        try:
+            bot_instance = Bot(token=token)
+        except InvalidToken as e:
+            await notify_admins_invalid_bot(token, str(e), bot_record.get("owner_id"))
+            delete_bot_by_token(token)
+            continue
         user_ids = get_all_user_ids(db_path)
         for idx, uid in enumerate(user_ids, start=1):
             try:
@@ -2656,6 +2705,11 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Forbidden:
                 blocked += 1
                 logger.warning("Пользователь %s заблокировал бота %s", uid, token)
+            except InvalidToken as e:
+                logger.error("Токен %s устарел при рассылке: %s", token, e)
+                await notify_admins_invalid_bot(token, str(e), bot_record.get("owner_id"))
+                delete_bot_by_token(token)
+                break
             except Exception as e:
                 failed += 1
                 logger.error(f"Не удалось отправить сообщение {uid} через {token}: {e}")
@@ -2943,23 +2997,42 @@ def configure_application(app):
 
 
 async def launch_bot(token: str):
-    app = ApplicationBuilder().token(token).build()
+    try:
+        app = ApplicationBuilder().token(token).build()
+    except InvalidToken as e:
+        bot_record = delete_bot_by_token(token)
+        owner_id = bot_record.get("owner_id") if bot_record else None
+        await notify_admins_invalid_bot(token, str(e), owner_id)
+        return
+
     configure_application(app)
+    started = False
     try:
         logger.info("🤖 Бот запущен")
         await app.initialize()
         await app.start()
         await app.updater.start_polling()
+        started = True
 
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             logger.info("🛑 Остановка бота")
+            raise
+    except InvalidToken as e:
+        bot_record = delete_bot_by_token(token)
+        owner_id = bot_record.get("owner_id") if bot_record else None
+        await notify_admins_invalid_bot(token, str(e), owner_id)
+    except Exception as e:
+        bot_record = get_bot_by_token(token)
+        owner_id = bot_record.get("owner_id") if bot_record else None
+        logger.exception("Ошибка запуска бота %s: %s", token, e)
+        await notify_admins_invalid_bot(token, str(e), owner_id)
+    finally:
+        if started:
             await app.updater.stop()
             await app.stop()
             await app.shutdown()
-            raise
-    finally:
         RUNNING_BOTS.pop(token, None)
 
 
@@ -2994,7 +3067,7 @@ async def main_async():
         await ensure_bot_running(token)
 
     if RUNNING_BOTS:
-        await asyncio.gather(*RUNNING_BOTS.values())
+        await asyncio.gather(*RUNNING_BOTS.values(), return_exceptions=True)
 
 
 if __name__ == "__main__":
