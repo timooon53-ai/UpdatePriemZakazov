@@ -8,8 +8,10 @@ import requests
 import random
 import time
 import warnings
+import shutil
 from datetime import datetime
 from functools import wraps
+from pathlib import Path
 
 
 DEFAULT_CHANNEL_URL = "https://t.me/TaxiFromMike"
@@ -20,26 +22,41 @@ REQUIRED_CHANNEL = -1003460665929
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton, Bot, ReplyKeyboardRemove
+    ReplyKeyboardMarkup, KeyboardButton, Bot, ReplyKeyboardRemove, ForceReply,
 )
+from telegram.constants import ChatAction
+from telegram.error import Forbidden, InvalidToken
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler, ConversationHandler,
 )
 from telegram.warnings import PTBUserWarning
 
-TOKEN = os.getenv("BOT_TOKEN") or TOKEN
-PRIMARY_BOT_TOKEN = locals().get("PRIMARY_BOT_TOKEN") or os.getenv("PRIMARY_BOT_TOKEN") or TOKEN
-ADMIN_IDS = ADMIN_IDS
-SCREENSHOTS_DIR = SCREENSHOTS_DIR
-DB_DIR = DB_DIR
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_DB_DIR = BASE_DIR / "db"
+DEFAULT_SCREENSHOTS_DIR = BASE_DIR / "screens"
 
-DB_PATH = os.getenv("DB_PATH") or DB_PATH
-USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
-SECONDARY_DB_PATH = (
-    os.getenv("SECONDARY_DB_PATH")
-    or r"C:\\Users\\Administrator\\PycharmProjects\\SmenaOplati\\bot.db"
+TOKEN = os.getenv("BOT_TOKEN") or locals().get("TOKEN")
+PRIMARY_BOT_TOKEN = (
+    locals().get("PRIMARY_BOT_TOKEN") or os.getenv("PRIMARY_BOT_TOKEN") or TOKEN
 )
+ADMIN_IDS = locals().get("ADMIN_IDS", [])
+SCREENSHOTS_DIR = Path(
+    os.getenv("SCREENSHOTS_DIR")
+    or locals().get("SCREENSHOTS_DIR")
+    or DEFAULT_SCREENSHOTS_DIR
+)
+DB_DIR = Path(os.getenv("DB_DIR") or locals().get("DB_DIR") or DEFAULT_DB_DIR)
+
+DB_PATH = Path(os.getenv("DB_PATH") or locals().get("DB_PATH") or DB_DIR / "bot.db")
+USERS_DB = ORDERS_DB = BANNED_DB = DB_PATH
+SECONDARY_DB_PATH = Path(
+    os.getenv("SECONDARY_DB_PATH")
+    or locals().get("SECONDARY_DB_PATH")
+    or DB_DIR / "bot_secondary.db"
+)
+
+PODMENA_DB_PATH = DB_DIR / "podmena.db"
 
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
 SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
@@ -250,6 +267,24 @@ def init_db(db_path=DB_PATH):
         conn.commit()
 
 
+def init_podmena_db(db_path=PODMENA_DB_PATH):
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS podmena (
+                orderid TEXT UNIQUE,
+                token2 TEXT,
+                id TEXT,
+                card_x TEXT
+            )
+            """
+        )
+        conn.commit()
+    logger.info("Инициализация podmena.db завершена")
+
+
 def get_setting(key, default=None, db_path=DB_PATH):
     with sqlite3.connect(db_path) as conn:
         c = conn.cursor()
@@ -274,8 +309,37 @@ def is_ordering_enabled():
 # ==========================
 # Работа с пользователями
 # ==========================
+def safe_token_slug(token: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in (token or ""))[:32] or "bot"
+
+
+def get_bot_db_path(token: str) -> str:
+    record = get_bot_by_token(token)
+    if record and record.get("db_path"):
+        return record["db_path"]
+    return DB_PATH
+
+
 def add_user(tg_id, username):
     with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO users (tg_id, username)
+            VALUES (?, ?)
+            ON CONFLICT(tg_id) DO UPDATE SET username = COALESCE(excluded.username, users.username)
+            """,
+            (tg_id, username),
+        )
+        conn.commit()
+
+
+def add_user_to_bot_db(tg_id: int, username: str | None, bot_token: str | None):
+    if not bot_token:
+        return
+    bot_db = get_bot_db_path(bot_token)
+    init_db(bot_db)
+    with sqlite3.connect(bot_db) as conn:
         c = conn.cursor()
         c.execute(
             """
@@ -339,11 +403,41 @@ def delete_favorite_address(fav_id, tg_id):
         conn.commit()
 
 
-def get_all_user_ids():
-    with sqlite3.connect(USERS_DB) as conn:
+def get_all_user_ids(db_path: str = USERS_DB):
+    with sqlite3.connect(db_path) as conn:
         c = conn.cursor()
         c.execute("SELECT tg_id FROM users")
         return [row[0] for row in c.fetchall()]
+
+
+def count_bot_users(bot_token: str) -> int:
+    db_path = get_bot_db_path(bot_token)
+    if not os.path.exists(db_path):
+        return 0
+    with sqlite3.connect(db_path) as conn:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM users")
+        row = c.fetchone()
+        return row[0] if row else 0
+
+
+def count_bot_orders(bot_token: str) -> int:
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM orders WHERE bot_token=?", (bot_token,))
+        row = c.fetchone()
+        return row[0] if row else 0
+
+
+def calc_owner_earnings(bot_token: str) -> float:
+    with sqlite3.connect(ORDERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT SUM(COALESCE(amount, base_amount, 0)) FROM orders WHERE bot_token=?",
+            (bot_token,),
+        )
+        total = c.fetchone()[0] or 0
+        return round(total * 0.15, 2)
 
 
 def add_user_bot(owner_id: int, token: str, db_path: str, title: str | None = None):
@@ -394,12 +488,59 @@ def get_bot_by_token(token: str):
         return dict(row) if row else None
 
 
+def delete_bot_by_token(token: str):
+    bot_record = get_bot_by_token(token)
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM user_bots WHERE token=?", (token,))
+        conn.commit()
+
+    bot_dir = DB_DIR / safe_token_slug(token)
+    if bot_dir.is_dir():
+        shutil.rmtree(bot_dir, ignore_errors=True)
+
+    return bot_record
+
+
+async def notify_admins_invalid_bot(token: str, reason: str, owner_id: int | None = None):
+    try:
+        admin_bot = Bot(token=PRIMARY_BOT_TOKEN)
+    except Exception as e:
+        logger.error("Не удалось создать бот для уведомления админов: %s", e)
+        return
+
+    owner_hint = ""
+    if owner_id:
+        owner_info = get_user(owner_id)
+        if owner_info and owner_info.get("username"):
+            owner_hint = f"\n👤 Владелец: @{owner_info['username']}"
+        else:
+            owner_hint = f"\n👤 Владелец: {owner_id}"
+
+    text = (
+        "⚠️ Ошибка запуска подключённого бота\n"
+        f"🔑 Токен: {token}\n"
+        f"🚫 Причина: {reason}{owner_hint}\n"
+        "Токен удалён из базы, работа продолжается."
+    )
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await admin_bot.send_message(admin_id, text)
+        except Exception as send_error:
+            logger.error("Не удалось отправить уведомление админу %s: %s", admin_id, send_error)
+
+
 def create_bot_storage(token: str, owner_id: int, title: str | None = None):
-    db_path = DB_PATH
+    slug = safe_token_slug(token)
+    bot_dir = DB_DIR / slug
+    os.makedirs(bot_dir, exist_ok=True)
+    db_path = bot_dir / "bot.db"
     init_db(db_path)
     set_setting("bot_owner", str(owner_id), db_path=db_path)
     set_setting("bot_token", token, db_path=db_path)
-    add_user_bot(owner_id, token, db_path, title)
+    add_user_bot(owner_id, token, str(db_path), title)
+    logger.info("Создано хранилище для бота %s в %s", token, db_path)
     return db_path
 
 
@@ -539,7 +680,37 @@ def create_order(
         )
         order_id = c.lastrowid
         conn.commit()
-        return order_id
+    bot_db = get_bot_db_path(bot_token or PRIMARY_BOT_TOKEN)
+    if bot_db != ORDERS_DB:
+        init_db(bot_db)
+        with sqlite3.connect(bot_db) as conn:
+            c = conn.cursor()
+            c.execute(
+                """
+                INSERT INTO orders (
+                    tg_id, bot_token, type, screenshot_path, city, address_from, address_to, address_extra,
+                    tariff, child_seat, child_seat_type, wishes, comment
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    tg_id,
+                    bot_token or PRIMARY_BOT_TOKEN,
+                    type_,
+                    screenshot_path,
+                    city,
+                    address_from,
+                    address_to,
+                    address_extra,
+                    tariff,
+                    child_seat,
+                    child_seat_type,
+                    wishes,
+                    comment,
+                ),
+            )
+            conn.commit()
+    return order_id
 
 
 def get_order(order_id):
@@ -719,6 +890,44 @@ def save_replacement_to_secondary_db(info):
         logger.error("Не удалось записать поездку в вторую БД: %s", e)
         return False
 
+
+def upsert_podmena_entry(info, db_path=PODMENA_DB_PATH):
+    if not info:
+        return False
+
+    init_podmena_db(db_path)
+
+    orderid = info.get("order_number") or str(info.get("order_id") or info.get("id"))
+    token2 = info.get("token2") or ""
+    card_x = info.get("card_x") or ""
+    external_id = info.get("external_id") or ""
+
+    with sqlite3.connect(db_path) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO podmena (orderid, token2, id, card_x)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(orderid) DO UPDATE SET
+                token2=excluded.token2,
+                id=excluded.id,
+                card_x=excluded.card_x
+            """,
+            (orderid, token2, external_id, card_x),
+        )
+        conn.commit()
+    logger.info("Запись подмены сохранена/обновлена в podmena.db: %s", orderid)
+    return True
+
+
+def clear_podmena_entries(db_path=PODMENA_DB_PATH):
+    init_podmena_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM podmena")
+        conn.commit()
+    logger.info("podmena.db очищена по запросу администратора")
+
 # ==========================
 # Декоратор проверки админа
 # ==========================
@@ -786,6 +995,10 @@ def start_links_keyboard():
         [InlineKeyboardButton("❄️ Чат", url=CHAT_URL)],
     ]
     return InlineKeyboardMarkup(buttons)
+
+
+def taxi_force_reply_markup():
+    return ForceReply(selective=True, input_field_placeholder="Такси от Майка")
 
 
 def profile_keyboard(has_city: bool, has_favorites: bool):
@@ -1009,8 +1222,10 @@ def admin_panel_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎁 Заказы пользователя", callback_data="admin_orders")],
         [InlineKeyboardButton("🔔 Обновить информацию", callback_data="admin_refresh")],
+        [InlineKeyboardButton("📡 Все боты", callback_data="admin_all_bots")],
         [InlineKeyboardButton("🎺 Рассылка по всем", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🔔 Заказы для подмены", callback_data="admin_replacements")],
+        [InlineKeyboardButton("🧹 Очистить подмены", callback_data="admin_podmena_clear")],
         [InlineKeyboardButton(ordering_label, callback_data="admin_toggle")],
         [InlineKeyboardButton(status_text, callback_data="admin_status")],
     ])
@@ -1018,6 +1233,24 @@ def admin_panel_keyboard():
 
 async def admin_show_panel(target):
     await target.reply_text("🔔❄️ Админ-панель", reply_markup=admin_panel_keyboard())
+
+
+def admins_bots_keyboard():
+    bots = list_all_bots()
+    seen = set()
+    buttons = []
+    for bot in bots:
+        owner_id = bot.get("owner_id")
+        if owner_id in seen:
+            continue
+        seen.add(owner_id)
+        user = get_user(owner_id)
+        label = f"@{user.get('username')}" if user and user.get("username") else f"ID {owner_id}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"admin_owner_{owner_id}")])
+    if not buttons:
+        buttons.append([InlineKeyboardButton("Нет подключённых ботов", callback_data="admin_status")])
+    buttons.append([InlineKeyboardButton("🎄 Главное меню", callback_data="admin_status")])
+    return InlineKeyboardMarkup(buttons)
 
 # ==========================
 # Обработчики команд
@@ -1042,6 +1275,7 @@ def not_banned(func):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     add_user(user.id, user.username)
+    add_user_to_bot_db(user.id, user.username, context.bot.token)
     target = update.effective_message
     if target:
         await target.reply_text(
@@ -1370,7 +1604,7 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data.clear()
     context.user_data['order_data'] = {}
     if data == "order_screenshot":
-        await query.message.reply_text("Пришлите скриншот маршрута 🎀")
+        await query.edit_message_text("🖼️ Пришлите скриншот маршрута 🎀")
         return WAIT_SCREENSHOT
     elif data == "order_text":
         context.user_data['order_type'] = "text"
@@ -1379,9 +1613,10 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data.setdefault('order_data', {})['city'] = saved_user.get("city")
             await ask_address_from(query, context)
             return WAIT_ADDRESS_FROM
+        await query.edit_message_text("🌆 Укажи город для поездки (Такси от Майка)")
         await query.message.reply_text(
-            "Введите город 🌟️",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Отмена", callback_data="order_back")]]),
+            "Напишите город отправления ✨",
+            reply_markup=taxi_force_reply_markup(),
         )
         return WAIT_CITY
     elif data == "order_back":
@@ -1455,10 +1690,10 @@ async def screenshot_receive(update: Update, context: ContextTypes.DEFAULT_TYPE)
     tg_id = update.effective_user.id
 
     order_id = create_order(tg_id, type_="screenshot", bot_token=context.bot.token)
-    path = os.path.join(SCREENSHOTS_DIR, f"{order_id}.jpg")
+    path = SCREENSHOTS_DIR / f"{order_id}.jpg"
     await file.download_to_drive(path)
 
-    update_order_fields(order_id, screenshot_path=path)
+    update_order_fields(order_id, screenshot_path=str(path))
     context.user_data['order_id'] = order_id
     context.user_data['order_type'] = "screenshot"
     context.user_data['order_data'] = {}
@@ -1474,7 +1709,10 @@ async def ask_address_from(update_or_query, context):
     if favorites:
         await target.reply_text("Адрес откуда ❄️", reply_markup=favorites_select_keyboard(favorites, "from"))
     else:
-        await target.reply_text("Адрес откуда ❄️")
+        await target.reply_text(
+            "🧭 Введите адрес отправления (Такси от Майка)",
+            reply_markup=taxi_force_reply_markup(),
+        )
 
 
 async def ask_address_to(update_or_query, context):
@@ -1484,7 +1722,10 @@ async def ask_address_to(update_or_query, context):
     if favorites:
         await target.reply_text("Адрес куда ❄️", reply_markup=favorites_select_keyboard(favorites, "to"))
     else:
-        await target.reply_text("Адрес куда ❄️")
+        await target.reply_text(
+            "📍 Введите адрес назначения (Такси от Майка)",
+            reply_markup=taxi_force_reply_markup(),
+        )
 
 
 async def ask_address_third(update_or_query, context):
@@ -1494,7 +1735,10 @@ async def ask_address_third(update_or_query, context):
     if favorites:
         await target.reply_text("Введите третий адрес 🧭❄️", reply_markup=favorites_select_keyboard(favorites, "third"))
     else:
-        await target.reply_text("Введите третий адрес 🧭❄️")
+        await target.reply_text(
+            "Введите дополнительный адрес 🧭 (Такси от Майка)",
+            reply_markup=taxi_force_reply_markup(),
+        )
 
 
 async def text_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1548,11 +1792,11 @@ async def favorite_address_callback(update: Update, context: ContextTypes.DEFAUL
 
     if payload == "manual":
         prompt = {
-            "from": "Введите адрес откуда ❄️",
-            "to": "Введите адрес куда ❄️",
-            "third": "Введите третий адрес 🧭❄️",
+            "from": "Введите адрес откуда ❄️ (Такси от Майка)",
+            "to": "Введите адрес куда ❄️ (Такси от Майка)",
+            "third": "Введите третий адрес 🧭❄️ (Такси от Майка)",
         }.get(stage, "Введите адрес")
-        await query.message.reply_text(prompt)
+        await query.message.reply_text(prompt, reply_markup=taxi_force_reply_markup())
         return {
             "from": WAIT_ADDRESS_FROM,
             "to": WAIT_ADDRESS_TO,
@@ -2065,6 +2309,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_id = int(data.rsplit("_", 1)[1])
         info_id = create_order_info(order_id)
         info = get_order_info(info_id)
+        upsert_podmena_entry(info)
         await query.message.reply_text(
             "Заполните данные заказа для подмены:",
             reply_markup=replacement_fields_keyboard(info),
@@ -2129,9 +2374,50 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_refresh":
         await refresh_all_users(query.message, context)
         return ConversationHandler.END
+    elif data == "admin_all_bots":
+        await query.message.reply_text(
+            "📡 Подключённые боты по владельцам:", reply_markup=admins_bots_keyboard()
+        )
+        return ConversationHandler.END
+    elif data.startswith("admin_owner_"):
+        owner_id = int(data.rsplit("_", 1)[1])
+        bots = list_user_bots(owner_id)
+        if not bots:
+            await query.message.reply_text(
+                "У пользователя нет подключённых ботов", reply_markup=admin_panel_keyboard()
+            )
+            return ConversationHandler.END
+        owner = get_user(owner_id) or {}
+        lines = [f"🧑‍💻 Владелец: @{owner.get('username') or owner_id}"]
+        for bot in bots:
+            token = bot.get("token")
+            lines.append(
+                "\n".join(
+                    [
+                        "🤖 Бот: " + (bot.get("title") or "Без названия"),
+                        f"🔑 Токен: {token}",
+                        f"👥 Пользователи: {count_bot_users(token)}",
+                        f"🧾 Заказы: {count_bot_orders(token)}",
+                        f"💸 Доход владельца: {calc_owner_earnings(token):.2f} ₽",
+                    ]
+                )
+            )
+        await query.message.reply_text(
+            "\n\n".join(lines), reply_markup=admins_bots_keyboard()
+        )
+        return ConversationHandler.END
     elif data == "admin_broadcast":
-        await query.message.reply_text("Введите текст рассылки для всех пользователей:")
+        await query.message.reply_text(
+            "📣 Пришлите текст или фото для рассылки по базе (Такси от Майка)",
+            reply_markup=taxi_force_reply_markup(),
+        )
         return WAIT_ADMIN_BROADCAST
+    elif data == "admin_podmena_clear":
+        clear_podmena_entries()
+        await query.message.reply_text(
+            "🧹 База подмен очищена.", reply_markup=admin_panel_keyboard()
+        )
+        return ConversationHandler.END
     elif data == "admin_toggle":
         new_value = "0" if is_ordering_enabled() else "1"
         set_setting("ordering_enabled", new_value)
@@ -2214,6 +2500,7 @@ async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data.pop('replacement_field', None)
 
     info = get_order_info(info_id)
+    upsert_podmena_entry(info)
     saved = save_replacement_to_secondary_db(info)
     if not saved:
         fallback = f"{info.get('external_id', '-')}/{info.get('order_number', '-')}/{info.get('card_x', '-')}/{info.get('token2', '-')}"
@@ -2381,20 +2668,76 @@ async def refresh_all_users(target, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user_ids = get_all_user_ids()
+    sender_id = update.effective_user.id
+    if sender_id not in ADMIN_IDS:
+        await update.message.reply_text("🚫 Только администраторы могут рассылать сообщения.")
+        return ConversationHandler.END
+
+    msg = update.message
+    content_text = msg.caption or msg.text
+    photo = msg.photo[-1] if msg.photo else None
+
+    if not (content_text or photo):
+        await msg.reply_text(
+            "⚠️ Пришлите текст или фото для рассылки (Такси от Майка)",
+            reply_markup=taxi_force_reply_markup(),
+        )
+        return WAIT_ADMIN_BROADCAST
+
+    status_message = await msg.reply_text("⏳ Обрабатываю рассылку...")
+
     sent = 0
     failed = 0
-    for uid in user_ids:
+    blocked = 0
+
+    bots = list_all_bots()
+    if not bots:
+        await status_message.edit_text("Нет подключённых ботов", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+
+    for bot_record in bots:
+        token = bot_record.get("token")
+        db_path = bot_record.get("db_path") or DB_PATH
         try:
-            await context.bot.send_message(uid, f"🎺 Рассылка:\n{text}")
-            sent += 1
-        except Exception as e:
-            logger.error(f"Не удалось отправить сообщение {uid}: {e}")
-            failed += 1
-    await update.message.reply_text(
-        f"Рассылка завершена. 🎉 {sent} отправлено, 🎄🚫 {failed} не доставлено.",
-        reply_markup=admin_panel_keyboard(),
+            bot_instance = Bot(token=token)
+        except InvalidToken as e:
+            await notify_admins_invalid_bot(token, str(e), bot_record.get("owner_id"))
+            delete_bot_by_token(token)
+            continue
+        user_ids = get_all_user_ids(db_path)
+        for idx, uid in enumerate(user_ids, start=1):
+            try:
+                action = ChatAction.UPLOAD_PHOTO if photo else ChatAction.TYPING
+                await bot_instance.send_chat_action(uid, action)
+                if photo:
+                    await bot_instance.send_photo(uid, photo=photo.file_id, caption=content_text)
+                else:
+                    await bot_instance.send_message(uid, f"🎺 Такси от Майка:\n{content_text}")
+                sent += 1
+            except Forbidden:
+                blocked += 1
+                logger.warning("Пользователь %s заблокировал бота %s", uid, token)
+            except InvalidToken as e:
+                logger.error("Токен %s устарел при рассылке: %s", token, e)
+                await notify_admins_invalid_bot(token, str(e), bot_record.get("owner_id"))
+                delete_bot_by_token(token)
+                break
+            except Exception as e:
+                failed += 1
+                logger.error(f"Не удалось отправить сообщение {uid} через {token}: {e}")
+
+            if idx % 20 == 0:
+                await asyncio.sleep(0.5)
+
+    summary_lines = [
+        "📣 Рассылка завершена",
+        f"✅ Доставлено: {sent}",
+        f"🚫 Блок: {blocked}",
+        f"⚠️ Ошибок: {failed}",
+    ]
+
+    await status_message.edit_text(
+        "\n".join(summary_lines), reply_markup=admin_panel_keyboard()
     )
     return ConversationHandler.END
 
@@ -2552,12 +2895,17 @@ def configure_application(app):
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_broadcast|admin_toggle|admin_status|admin_replacements|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
             WAIT_ADMIN_ORDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_orders_lookup)],
-            WAIT_ADMIN_BROADCAST: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_broadcast)],
+            WAIT_ADMIN_BROADCAST: [
+                MessageHandler(
+                    (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
+                    admin_broadcast,
+                )
+            ],
             WAIT_REPLACEMENT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_replacement_save)],
         },
         fallbacks=[CommandHandler("start", start_over)],
@@ -2583,7 +2931,7 @@ def configure_application(app):
     app.add_handler(payment_conv)
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|payapprove_|paydecline_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_podmena_clear|payapprove_|paydecline_)"))
 
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
@@ -2661,23 +3009,42 @@ def configure_application(app):
 
 
 async def launch_bot(token: str):
-    app = ApplicationBuilder().token(token).build()
+    try:
+        app = ApplicationBuilder().token(token).build()
+    except InvalidToken as e:
+        bot_record = delete_bot_by_token(token)
+        owner_id = bot_record.get("owner_id") if bot_record else None
+        await notify_admins_invalid_bot(token, str(e), owner_id)
+        return
+
     configure_application(app)
+    started = False
     try:
         logger.info("🤖 Бот запущен")
         await app.initialize()
         await app.start()
         await app.updater.start_polling()
+        started = True
 
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             logger.info("🛑 Остановка бота")
+            raise
+    except InvalidToken as e:
+        bot_record = delete_bot_by_token(token)
+        owner_id = bot_record.get("owner_id") if bot_record else None
+        await notify_admins_invalid_bot(token, str(e), owner_id)
+    except Exception as e:
+        bot_record = get_bot_by_token(token)
+        owner_id = bot_record.get("owner_id") if bot_record else None
+        logger.exception("Ошибка запуска бота %s: %s", token, e)
+        await notify_admins_invalid_bot(token, str(e), owner_id)
+    finally:
+        if started:
             await app.updater.stop()
             await app.stop()
             await app.shutdown()
-            raise
-    finally:
         RUNNING_BOTS.pop(token, None)
 
 
@@ -2701,6 +3068,7 @@ async def stop_bot(token: str):
 
 async def main_async():
     init_db()
+    init_podmena_db()
     add_user_bot(0, PRIMARY_BOT_TOKEN, DB_PATH, "Основной бот")
     tokens = {TOKEN, PRIMARY_BOT_TOKEN}
     for bot in list_all_bots():
@@ -2711,7 +3079,7 @@ async def main_async():
         await ensure_bot_running(token)
 
     if RUNNING_BOTS:
-        await asyncio.gather(*RUNNING_BOTS.values())
+        await asyncio.gather(*RUNNING_BOTS.values(), return_exceptions=True)
 
 
 if __name__ == "__main__":
