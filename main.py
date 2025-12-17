@@ -1904,10 +1904,14 @@ async def notify_admins_payment(context: ContextTypes.DEFAULT_TYPE, payment_id: 
             logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
 
-async def animate_status_message(message, frames: list[str], delay: int = 3):
+async def animate_status_message(
+    message, frames: list[str], delay: int = 4, cycles: int = 3
+):
     """Плавно обновляет текст сообщения для создания вау-эффекта."""
-    for text in frames:
+    total_steps = max(1, cycles) * len(frames)
+    for step in range(total_steps):
         await asyncio.sleep(delay)
+        text = frames[step % len(frames)]
         try:
             await message.edit_text(text)
         except Exception as e:
@@ -1937,17 +1941,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=admin_in_progress_buttons(order_id))
 
         user_id = order.get("tg_id")
-        status_message = await context.bot.send_message(
-            user_id, f"🎄 Ваш заказ №{order_id} взят в работу! 🛷"
-        )
+        status_frames = [
+            "🚕 Уже взяли в работу ваш заказ",
+            "🛠️ Трудимся над вашим заказом",
+            "🚦 Скоро начнём поиск такси",
+        ]
+        status_message = await context.bot.send_message(user_id, status_frames[0])
         context.application.create_task(
-            animate_status_message(
-                status_message,
-                [
-                    f"✨ Мы уже работаем над вашим заказом №{order_id}! ❄️",
-                    f"🎁 Активно занимаемся вашим заказом №{order_id}! ⛄️",
-                ],
-            )
+            animate_status_message(status_message, status_frames)
         )
 
         # удаляем сообщение у других админов
@@ -1973,35 +1974,51 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=admin_search_buttons(order_id))
         order = get_order(order_id)
         user_id = order.get("tg_id")
-        search_message = await context.bot.send_message(
-            user_id,
-            f"🎄 Начинаем поиск такси для вашего заказа №{order_id}! 🛷",
-        )
+        search_frames = [
+            "🔍 Поиск машины",
+            "🚗 Ищем вам машину",
+            "🚕 Поиск такси",
+        ]
+        search_message = await context.bot.send_message(user_id, search_frames[0])
         context.application.create_task(
-            animate_status_message(
-                search_message,
-                [
-                    f"✨ Мы подбираем лучшее предложение для заказа №{order_id}! ❄️",
-                    f"🎆 Активно ищем такси для заказа №{order_id}! 🎁",
-                ],
-            )
+            animate_status_message(search_message, search_frames)
         )
     # Отмена поиска / заказ
     elif data.startswith("cancel_") or data.startswith("cancelsearch_"):
         order_id = int(data.split("_")[1])
+        order = get_order(order_id)
+        if not order:
+            await query.answer("Заказ не найден", show_alert=True)
+            return ConversationHandler.END
+
         update_order_status(order_id, "cancelled")
         await query.edit_message_text("Заказ отменён 🎄🚫")
-        order = get_order(order_id)
         user_id = order.get("tg_id")
         await context.bot.send_message(user_id, f"Ваш заказ №{order_id} отменён ❄️")
+
+        for admin_id in ADMIN_IDS:
+            if admin_id != query.from_user.id:
+                try:
+                    await context.bot.delete_message(
+                        chat_id=admin_id, message_id=query.message.message_id
+                    )
+                except Exception:
+                    pass
     # Нашлась машина
     elif data.startswith("found_"):
         order_id = int(data.split("_")[1])
         context.user_data['order_id'] = order_id
         order = get_order(order_id)
         tg_id = order.get("tg_id")
-        await context.bot.send_message(tg_id,
-                                       f"🛷 Ваш заказ №{order_id} нашёл машину! Пожалуйста, ожидайте инструкций от администратора.")
+        found_frames = [
+            "✅ Машина успешно найдена",
+            "📨 Сейчас отправим вам ссылку на машину",
+            "🛣️ Машина едет к вам",
+        ]
+        found_message = await context.bot.send_message(tg_id, found_frames[0])
+        context.application.create_task(
+            animate_status_message(found_message, found_frames)
+        )
         await query.message.reply_text("Введите сообщение пользователю:")
         return WAIT_ADMIN_MESSAGE
 
