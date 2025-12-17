@@ -2392,7 +2392,6 @@ def main():
     app.add_handler(
         MessageHandler(filters.ALL, subscription_gate),
         group=0,
-        block=False,
     )
     app.add_handler(
         CallbackQueryHandler(check_subscription_callback, pattern="^check_subscription$"),
