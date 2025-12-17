@@ -2389,7 +2389,11 @@ def main():
     add_user_bot(0, PRIMARY_BOT_TOKEN, DB_PATH, "Основной бот")
     app = ApplicationBuilder().token(TOKEN).build()
 
-    app.add_handler(MessageHandler(filters.ALL, subscription_gate), group=0)
+    app.add_handler(
+        MessageHandler(filters.ALL, subscription_gate),
+        group=0,
+        block=False,
+    )
     app.add_handler(
         CallbackQueryHandler(check_subscription_callback, pattern="^check_subscription$"),
         group=0,
@@ -2425,7 +2429,6 @@ def main():
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
-        per_message=True,
     )
 
     admin_conv_handler = ConversationHandler(
@@ -2439,7 +2442,6 @@ def main():
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
-        per_message=True,
     )
 
     payment_conv = ConversationHandler(
@@ -2452,7 +2454,6 @@ def main():
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
-        per_message=True,
     )
 
     app.add_handler(conv_handler)
