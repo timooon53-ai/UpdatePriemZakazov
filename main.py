@@ -10,6 +10,10 @@ from datetime import datetime
 from functools import wraps
 
 
+DEFAULT_CHANNEL_URL = "https://t.me/TaxiFromMike"
+DEFAULT_OPERATOR_URL = "https://t.me/TakeMaxist"
+DEFAULT_CHAT_URL = "https://t.me/+z_S1iZMVW-ZmMzBi"
+
 REQUIRED_CHANNEL = -1003460665929
 
 from telegram import (
@@ -33,8 +37,6 @@ SECONDARY_DB_PATH = (
     os.getenv("SECONDARY_DB_PATH")
     or r"C:\\Users\\Administrator\\PycharmProjects\\SmenaOplati\\bot.db"
 )
-
-CURRENT_BOT_TOKEN = TOKEN
 
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
 SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
@@ -75,16 +77,9 @@ def current_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def required_channel_link() -> str:
-    channel_id = str(REQUIRED_CHANNEL)
-    if channel_id.startswith("-100") and channel_id[4:].isdigit():
-        return f"https://t.me/TaxiFromMike"
-    return f"https://t.me/TaxiFromMike"
-
-
-CHANNEL_URL = (os.getenv("CHANNEL_URL") or required_channel_link()).strip()
-OPERATOR_URL = (os.getenv("OPERATOR_URL") or required_channel_link()).strip()
-CHAT_URL = (os.getenv("CHAT_URL") or required_channel_link()).strip()
+CHANNEL_URL = (os.getenv("CHANNEL_URL") or DEFAULT_CHANNEL_URL).strip()
+OPERATOR_URL = (os.getenv("OPERATOR_URL") or DEFAULT_OPERATOR_URL).strip()
+CHAT_URL = (os.getenv("CHAT_URL") or DEFAULT_CHAT_URL).strip()
 
 # ==========================
 # Инициализация БД
@@ -364,6 +359,14 @@ def list_user_bots(owner_id: int):
         return [dict(row) for row in c.fetchall()]
 
 
+def list_all_bots():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM user_bots ORDER BY created_at DESC")
+        return [dict(row) for row in c.fetchall()]
+
+
 def delete_user_bot(bot_id: int, owner_id: int):
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
@@ -511,7 +514,7 @@ def create_order(
             """,
             (
                 tg_id,
-                bot_token or CURRENT_BOT_TOKEN,
+                bot_token or PRIMARY_BOT_TOKEN,
                 type_,
                 screenshot_path,
                 city,
@@ -1354,7 +1357,7 @@ async def screenshot_receive(update: Update, context: ContextTypes.DEFAULT_TYPE)
     file = await photo.get_file()
     tg_id = update.effective_user.id
 
-    order_id = create_order(tg_id, type_="screenshot")
+    order_id = create_order(tg_id, type_="screenshot", bot_token=context.bot.token)
     path = os.path.join(SCREENSHOTS_DIR, f"{order_id}.jpg")
     await file.download_to_drive(path)
 
@@ -1508,6 +1511,7 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_id = create_order(
             tg_id=update.effective_user.id,
             type_="text",
+            bot_token=context.bot.token,
             city=city,
             address_from=addr_from,
             address_to=addr_to,
@@ -2326,18 +2330,16 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==========================
-# Основной запуск
+# Запуск нескольких ботов
 # ==========================
-def main():
-    init_db()
-    add_user_bot(0, PRIMARY_BOT_TOKEN, DB_PATH, "Основной бот")
-    app = ApplicationBuilder().token(TOKEN).build()
+RUNNING_BOTS: dict[str, asyncio.Task] = {}
 
+
+def configure_application(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("ban", ban_user))
 
-    # ConversationHandler для заказов и админа
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(order_type_callback, pattern="^order_")],
         states={
@@ -2397,7 +2399,6 @@ def main():
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|payapprove_|paydecline_)"))
 
-    # Меню пользователя
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         user_id = update.effective_user.id
@@ -2425,12 +2426,10 @@ def main():
             except Exception:
                 await update.message.reply_text("Не удалось проверить токен. Убедитесь, что он корректен.")
                 return
-
             title = info.get("username") or info.get("first_name")
-            db_path = create_bot_storage(token, user_id, title)
-            await update.message.reply_text(
-                f"Бот подключён: {title or 'без имени'}. База данных создана по пути: {db_path}"
-            )
+            create_bot_storage(token, user_id, title)
+            await ensure_bot_running(token)
+            await update.message.reply_text("🤖 Бот успешно подключён! ✨")
             await send_profile_info(update.message, user_id, context)
             return
 
@@ -2474,12 +2473,38 @@ def main():
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # CallbackQueryHandler для админа
-    #app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|found_|chat_)"))
 
-    logger.info("Бот запущен")
-    app.run_polling()
+async def launch_bot(token: str):
+    app = ApplicationBuilder().token(token).build()
+    configure_application(app)
+    try:
+        logger.info("🤖 Бот запущен")
+        await app.run_polling()
+    finally:
+        RUNNING_BOTS.pop(token, None)
+
+
+async def ensure_bot_running(token: str):
+    if token in RUNNING_BOTS:
+        return
+    loop = asyncio.get_running_loop()
+    RUNNING_BOTS[token] = loop.create_task(launch_bot(token))
+
+
+async def main_async():
+    init_db()
+    add_user_bot(0, PRIMARY_BOT_TOKEN, DB_PATH, "Основной бот")
+    tokens = {TOKEN, PRIMARY_BOT_TOKEN}
+    for bot in list_all_bots():
+        if bot.get("token"):
+            tokens.add(bot.get("token"))
+
+    for token in tokens:
+        await ensure_bot_running(token)
+
+    if RUNNING_BOTS:
+        await asyncio.gather(*RUNNING_BOTS.values())
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())
