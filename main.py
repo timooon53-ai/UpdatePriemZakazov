@@ -1,5 +1,6 @@
 from cfg import *
 import os
+import sys
 import asyncio
 import sqlite3
 import logging
@@ -57,12 +58,15 @@ USDT_TRX_WALLET = (
     or "TJRe5tyJXMDp7PkUhKN97SQjpV2PR5VRR2"
 ).strip()
 
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("bot.log"),
-        logging.StreamHandler(),
+        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout),
     ],
 )
 logger = logging.getLogger(__name__)
@@ -2365,6 +2369,7 @@ def configure_application(app):
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
+        per_message=True,
     )
 
     admin_conv_handler = ConversationHandler(
@@ -2378,6 +2383,7 @@ def configure_application(app):
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
+        per_message=True,
     )
 
     payment_conv = ConversationHandler(
@@ -2390,6 +2396,7 @@ def configure_application(app):
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
+        per_message=True,
     )
 
     app.add_handler(conv_handler)
@@ -2479,7 +2486,18 @@ async def launch_bot(token: str):
     configure_application(app)
     try:
         logger.info("🤖 Бот запущен")
-        await app.run_polling()
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            logger.info("🛑 Остановка бота")
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
+            raise
     finally:
         RUNNING_BOTS.pop(token, None)
 
