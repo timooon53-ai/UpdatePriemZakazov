@@ -30,6 +30,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler, ConversationHandler,
 )
+from telegram.request import HTTPXRequest
 from telegram.warnings import PTBUserWarning
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -92,7 +93,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-primary_bot = Bot(token=PRIMARY_BOT_TOKEN)
+REQUEST_TIMEOUTS = dict(connect_timeout=15, read_timeout=30, write_timeout=30)
+
+primary_bot = Bot(token=PRIMARY_BOT_TOKEN, request=HTTPXRequest(**REQUEST_TIMEOUTS))
 bot_clients: dict[str, Bot] = {}
 
 
@@ -106,7 +109,7 @@ def get_bot_client(token: str | None) -> Bot:
         return bot_clients[token]
 
     try:
-        bot_clients[token] = Bot(token=token)
+        bot_clients[token] = Bot(token=token, request=HTTPXRequest(**REQUEST_TIMEOUTS))
     except InvalidToken as e:
         logger.error("Недействительный токен бота %s: %s", token, e)
         return primary_bot
@@ -2130,20 +2133,50 @@ async def notify_admins(context, order_id):
         parts.append(f"Детское кресло: {order.get('child_seat')}")
     if order.get("child_seat_type"):
         parts.append(f"Тип кресла: {order.get('child_seat_type')}")
-        if order.get("wishes"):
-            parts.append(f"Пожелания: {order.get('wishes')}")
-        if order.get("comment"):
-            parts.append(f"Комментарий: {order.get('comment')}")
+    if order.get("wishes"):
+        parts.append(f"Пожелания: {order.get('wishes')}")
+    if order.get("comment"):
+        parts.append(f"Комментарий: {order.get('comment')}")
 
     text = "\n".join(parts)
 
+    async def send_to_admin(admin_id: int, bot: Bot):
+        if order.get("screenshot_path"):
+            with open(order.get("screenshot_path"), "rb") as photo:
+                await bot.send_photo(
+                    admin_id,
+                    photo=photo,
+                    caption=text,
+                    reply_markup=admin_order_buttons(order_id),
+                )
+        else:
+            await bot.send_message(
+                admin_id,
+                text,
+                reply_markup=admin_order_buttons(order_id),
+            )
+
     for admin_id in ADMIN_IDS:
         try:
-            if order.get("screenshot_path"):
-                with open(order.get("screenshot_path"), "rb") as photo:
-                    await primary_bot.send_photo(admin_id, photo=photo, caption=text, reply_markup=admin_order_buttons(order_id))
-            else:
-                await primary_bot.send_message(admin_id, text, reply_markup=admin_order_buttons(order_id))
+            order_bot = get_order_bot(order)
+            sent = False
+
+            for bot in (order_bot, primary_bot):
+                try:
+                    await send_to_admin(admin_id, bot)
+                    sent = True
+                    break
+                except Exception as bot_error:
+                    logger.error(
+                        "Ошибка уведомления админа %s через бота %s: %s",
+                        admin_id,
+                        getattr(bot, "token", "unknown"),
+                        bot_error,
+                    )
+                    await asyncio.sleep(1)
+
+            if not sent:
+                raise RuntimeError("Не удалось отправить уведомление ни одним ботом")
         except Exception as e:
             logger.error(f"Ошибка уведомления админа {admin_id}: {e}")
 
