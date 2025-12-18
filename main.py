@@ -99,6 +99,41 @@ primary_bot = Bot(token=PRIMARY_BOT_TOKEN, request=HTTPXRequest(**REQUEST_TIMEOU
 bot_clients: dict[str, Bot] = {}
 
 
+def _markup_to_dict(markup):
+    if markup is None:
+        return None
+    try:
+        return markup.to_dict()
+    except Exception:
+        return markup
+
+
+async def safe_edit_message(target, text: str | None = None, reply_markup=None):
+    """Редактирует сообщение только если есть изменения."""
+    message = getattr(target, "message", None) or target
+    if not message:
+        return None
+
+    current_text = message.caption if message.caption is not None else (message.text or "")
+    if (text is None or text == current_text) and _markup_to_dict(message.reply_markup) == _markup_to_dict(reply_markup):
+        return message
+
+    try:
+        if message.photo:
+            return await message.edit_caption(caption=text, reply_markup=reply_markup)
+        return await message.edit_text(text, reply_markup=reply_markup)
+    except Exception as e:
+        logger.warning("Не удалось обновить сообщение: %s", e)
+        return message
+
+
+async def safe_delete_message(bot: Bot, chat_id: int, message_id: int):
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as e:
+        logger.debug("Не удалось удалить сообщение %s в чате %s: %s", message_id, chat_id, e)
+
+
 def get_bot_client(token: str | None) -> Bot:
     token = (token or PRIMARY_BOT_TOKEN).strip()
 
@@ -1286,13 +1321,7 @@ def admin_search_buttons(order_id):
 
 
 async def edit_admin_message(query, text: str, reply_markup=None):
-    try:
-        if query.message and query.message.photo:
-            await query.edit_message_caption(caption=text, reply_markup=reply_markup)
-        else:
-            await query.edit_message_text(text, reply_markup=reply_markup)
-    except Exception as e:
-        logger.warning(f"Не удалось обновить сообщение админа: {e}")
+    await safe_edit_message(query, text=text, reply_markup=reply_markup)
 
 
 def payment_choice_keyboard(order_id):
@@ -2312,10 +2341,7 @@ async def animate_status_message(
     for step in range(total_steps):
         await asyncio.sleep(delay)
         text = frames[step % len(frames)]
-        try:
-            await message.edit_text(text)
-        except Exception as e:
-            logger.warning(f"Не удалось обновить статус сообщения: {e}")
+        await safe_edit_message(message, text=text)
 
 
 # ==========================
@@ -2355,10 +2381,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # удаляем сообщение у других админов
         for admin_id in ADMIN_IDS:
             if admin_id != query.from_user.id:
-                try:
-                    await context.bot.delete_message(chat_id=admin_id, message_id=query.message.message_id)
-                except:
-                    pass
+                await safe_delete_message(context.bot, chat_id=admin_id, message_id=query.message.message_id)
 
     # Отклонить
     elif data.startswith("reject_"):
@@ -2403,12 +2426,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for admin_id in ADMIN_IDS:
             if admin_id != query.from_user.id:
-                try:
-                    await context.bot.delete_message(
-                        chat_id=admin_id, message_id=query.message.message_id
-                    )
-                except Exception:
-                    pass
+                await safe_delete_message(
+                    context.bot, chat_id=admin_id, message_id=query.message.message_id
+                )
     # Нашлась машина
     elif data.startswith("found_"):
         order_id = int(data.split("_")[1])
@@ -3239,7 +3259,24 @@ async def ensure_bot_running(token: str):
     if token in RUNNING_BOTS:
         return
     loop = asyncio.get_running_loop()
-    RUNNING_BOTS[token] = loop.create_task(launch_bot(token))
+    task = loop.create_task(launch_bot(token))
+
+    async def _restart_after_delay():
+        await asyncio.sleep(5)
+        await ensure_bot_running(token)
+
+    def _on_done(done_task: asyncio.Task):
+        RUNNING_BOTS.pop(token, None)
+        if done_task.cancelled():
+            return
+        if done_task.exception():
+            logger.error("Бот %s завершился с ошибкой: %s", token, done_task.exception())
+        else:
+            logger.warning("Бот %s остановился. Перезапускаем.", token)
+        loop.create_task(_restart_after_delay())
+
+    task.add_done_callback(_on_done)
+    RUNNING_BOTS[token] = task
 
 
 async def stop_bot(token: str):
