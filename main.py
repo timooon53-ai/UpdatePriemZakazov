@@ -17,6 +17,7 @@ from pathlib import Path
 DEFAULT_CHANNEL_URL = "https://t.me/TaxiFromMike"
 DEFAULT_OPERATOR_URL = "https://t.me/TakeMaxist"
 DEFAULT_CHAT_URL = "https://t.me/+z_S1iZMVW-ZmMzBi"
+FAQ_URL = "https://telegra.ph/FAQ-12-19-16"
 
 REQUIRED_CHANNEL = -1003460665929
 
@@ -97,6 +98,7 @@ REQUEST_TIMEOUTS = dict(connect_timeout=15, read_timeout=30, write_timeout=30)
 
 primary_bot = Bot(token=PRIMARY_BOT_TOKEN, request=HTTPXRequest(**REQUEST_TIMEOUTS))
 bot_clients: dict[str, Bot] = {}
+bot_link_cache: dict[str, str] = {}
 
 
 def _markup_to_dict(markup):
@@ -178,6 +180,7 @@ ORDER_BTN = "Заказать такси 🎄🛷"
 HELP_BTN = "Помощь ❄️"
 ADMIN_BTN = "Админка 🎅"
 BACK_BTN = "Назад ⛄️"
+FAQ_BTN = "FAQ 📚"
 
 # ==========================
 # Инициализация БД
@@ -578,6 +581,37 @@ def reset_bot_reward(bot_id: int):
         c = conn.cursor()
         c.execute("UPDATE user_bots SET pending_reward = 0 WHERE id=?", (bot_id,))
         conn.commit()
+
+
+def set_bot_reward(bot_id: int, value: float):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE user_bots SET pending_reward = ROUND(?, 2) WHERE id=?", (value, bot_id))
+        conn.commit()
+
+
+def get_bot_link(token: str, fallback_title: str | None = None) -> str:
+    if not token:
+        return fallback_title or "бот"
+
+    if token in bot_link_cache:
+        return bot_link_cache[token]
+
+    link = fallback_title or "бот"
+    try:
+        resp = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=10)
+        if resp.status_code == 200:
+            result = resp.json().get("result") or {}
+            username = result.get("username")
+            if username:
+                link = f"https://t.me/{username}"
+            elif result.get("first_name"):
+                link = result.get("first_name")
+    except Exception as e:
+        logger.warning("Не удалось получить ссылку на бота %s: %s", token, e)
+
+    bot_link_cache[token] = link
+    return link
 
 
 def delete_user_bot(bot_id: int, owner_id: int):
@@ -1088,6 +1122,7 @@ def main_menu_keyboard(user_id=None):
         [KeyboardButton(PROFILE_BTN)],
         [KeyboardButton(ORDER_BTN)],
         [KeyboardButton(HELP_BTN)],
+        [KeyboardButton(FAQ_BTN)],
     ]
     if user_id in ADMIN_IDS:
         buttons.append([KeyboardButton(ADMIN_BTN)])
@@ -1106,6 +1141,10 @@ def start_links_keyboard():
         [InlineKeyboardButton("❄️ Чат", url=CHAT_URL)],
     ]
     return InlineKeyboardMarkup(buttons)
+
+
+def faq_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📚 FAQ", url=FAQ_URL)]])
 
 
 def taxi_force_reply_markup():
@@ -1376,11 +1415,37 @@ def admin_owner_keyboard(owner_id: int, bots: list[dict]):
     for bot in bots:
         title = bot.get("title") or "Без названия"
         buttons.append(
+            [InlineKeyboardButton(f"➕ Добавить на баланс ({title})", callback_data=f"botadd_{bot.get('id')}")]
+        )
+        buttons.append(
+            [InlineKeyboardButton(f"➖ Списать с баланса ({title})", callback_data=f"botsub_{bot.get('id')}")]
+        )
+        buttons.append(
             [InlineKeyboardButton(f"Обнулить {title} ⛄️", callback_data=f"botreset_{bot.get('id')}")]
         )
     buttons.append([InlineKeyboardButton("🎄 Главное меню", callback_data="admin_status")])
     buttons.append([InlineKeyboardButton("📡 К списку владельцев", callback_data="admin_all_bots")])
     return InlineKeyboardMarkup(buttons)
+
+
+def build_owner_summary(owner_id: int, bots: list[dict]) -> str:
+    owner = get_user(owner_id) or {}
+    lines = [f"🧑‍💻 Владелец: @{owner.get('username') or owner_id}"]
+    for bot in bots:
+        token = bot.get("token")
+        lines.append(
+            "\n".join(
+                [
+                    "🤖 Бот: " + (bot.get("title") or "Без названия"),
+                    f"🔑 Токен: {token}",
+                    f"👥 Пользователи: {count_bot_users(token)}",
+                    f"🧾 Заказы: {count_bot_orders(token)}",
+                    f"🎁 Начислено (до вывода): {float(bot.get('pending_reward') or 0):.2f} ₽",
+                    f"💸 Доход по заказам: {calc_owner_earnings(token):.2f} ₽",
+                ]
+            )
+        )
+    return "\n\n".join(lines)
 
 # ==========================
 # Обработчики команд
@@ -1413,7 +1478,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=start_links_keyboard(),
         )
         await target.reply_text(
-            "🎁 Главное меню готово к волшебству!", reply_markup=main_menu_keyboard(user.id)
+            "🎉 С наступающим Новым годом! 🎁", reply_markup=main_menu_keyboard(user.id)
         )
     else:
         await context.bot.send_message(
@@ -1423,7 +1488,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await context.bot.send_message(
             chat_id=user.id,
-            text="🎁 Главное меню готово к волшебству!",
+            text="🎉 С наступающим Новым годом! 🎁",
             reply_markup=main_menu_keyboard(user.id),
         )
 
@@ -1708,7 +1773,8 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_ADMIN_ORDERS,
     WAIT_ADMIN_BROADCAST,
     WAIT_PAYMENT_PROOF,
-) = range(17)
+    WAIT_BOT_BALANCE,
+) = range(18)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -2212,7 +2278,7 @@ async def notify_admins_reward(order: dict):
         return
 
     order_id = order.get("id")
-    amount = order.get("amount") or order.get("base_amount") or 0
+    amount = order.get("base_amount") or order.get("amount") or 0
     bot_token = order.get("bot_token") or PRIMARY_BOT_TOKEN
     bot_record = get_bot_by_token(bot_token)
     owner_id = bot_record.get("owner_id") if bot_record else None
@@ -2580,25 +2646,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "У пользователя нет подключённых ботов", reply_markup=admin_panel_keyboard()
             )
             return ConversationHandler.END
-        owner = get_user(owner_id) or {}
-        lines = [f"🧑‍💻 Владелец: @{owner.get('username') or owner_id}"]
-        for bot in bots:
-            token = bot.get("token")
-            lines.append(
-                "\n".join(
-                    [
-                        "🤖 Бот: " + (bot.get("title") or "Без названия"),
-                        f"🔑 Токен: {token}",
-                        f"👥 Пользователи: {count_bot_users(token)}",
-                        f"🧾 Заказы: {count_bot_orders(token)}",
-                        f"🎁 Начислено (до вывода): {float(bot.get('pending_reward') or 0):.2f} ₽",
-                        f"💸 Доход по заказам: {calc_owner_earnings(token):.2f} ₽",
-                    ]
-                )
-            )
-        await query.message.reply_text(
-            "\n\n".join(lines), reply_markup=admin_owner_keyboard(owner_id, bots)
-        )
+        summary = build_owner_summary(owner_id, bots)
+        await query.message.reply_text(summary, reply_markup=admin_owner_keyboard(owner_id, bots))
         return ConversationHandler.END
     elif data.startswith("botreset_"):
         bot_id = int(data.rsplit("_", 1)[1])
@@ -2622,26 +2671,27 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 logger.warning("Не удалось уведомить владельца о сбросе начислений")
         bots = list_user_bots(owner_id) if owner_id else []
-        summary_lines = [
-            f"❄️ Начисления для бота {bot_title} сброшены до 0 ₽",
-        ]
+        summary_lines = [f"❄️ Начисления для бота {bot_title} сброшены до 0 ₽"]
         if bots:
-            for bot_info in bots:
-                token = bot_info.get("token")
-                summary_lines.append(
-                    "\n".join(
-                        [
-                            "🤖 Бот: " + (bot_info.get("title") or "Без названия"),
-                            f"🔑 Токен: {token}",
-                            f"🎁 Начислено (до вывода): {float(bot_info.get('pending_reward') or 0):.2f} ₽",
-                        ]
-                    )
-                )
-            reply_markup = admin_owner_keyboard(owner_id, bots)
-        else:
-            reply_markup = admin_panel_keyboard()
+            summary_lines.append(build_owner_summary(owner_id, bots))
+        reply_markup = admin_owner_keyboard(owner_id, bots) if bots else admin_panel_keyboard()
         await query.message.reply_text("\n\n".join(summary_lines), reply_markup=reply_markup)
         return ConversationHandler.END
+    elif data.startswith("botadd_") or data.startswith("botsub_"):
+        bot_id = int(data.rsplit("_", 1)[1])
+        bot = get_bot_by_id(bot_id)
+        if not bot:
+            await query.answer("Бот не найден", show_alert=True)
+            return ConversationHandler.END
+        action = "add" if data.startswith("botadd_") else "sub"
+        context.user_data["bot_balance_action"] = action
+        context.user_data["bot_balance_bot_id"] = bot_id
+        context.user_data["bot_balance_owner_id"] = bot.get("owner_id")
+        action_text = "добавления" if action == "add" else "списания"
+        await query.message.reply_text(
+            f"Введите сумму для {action_text} с баланса бота «{bot.get('title') or 'Без названия'}»:"
+        )
+        return WAIT_BOT_BALANCE
     elif data == "admin_broadcast":
         await query.message.reply_text(
             "📣 Пришлите текст или фото для рассылки по базе (Такси от Майка)",
@@ -3017,16 +3067,21 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bot_token = order.get("bot_token") or PRIMARY_BOT_TOKEN
     bot_record = get_bot_by_token(bot_token)
     if bot_record and bot_record.get("owner_id"):
-        reward = round(total * 0.15, 2)
+        reward = round(amount * 0.15, 2)
         add_bot_reward(bot_token, reward)
+        bot_link = get_bot_link(bot_token, bot_record.get("title"))
+        customer_username = (user or {}).get("username")
+        customer_label = f"@{customer_username}" if customer_username else "username не указан"
+        customer_text = f"{customer_label} (ID: {tg_id})"
         try:
             requests.post(
                 f"https://api.telegram.org/bot{bot_token}/sendMessage",
                 data={
                     "chat_id": bot_record.get("owner_id"),
                     "text": (
-                        f"Через вашего бота оформлен заказ №{order_id} на сумму {total:.2f} ₽.\n"
-                        f"Ваша комиссия: {reward:.2f} ₽ (15%)."
+                        f"Через вашего бота {bot_link} оформлен заказ №{order_id} на сумму {amount:.2f} ₽.\n"
+                        f"Ваша комиссия: {reward:.2f} ₽ (15%).\n\n"
+                        f"Заказчик - {customer_text}"
                     ),
                 },
                 timeout=10,
@@ -3049,6 +3104,50 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
+
+async def admin_bot_balance_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_value = update.message.text.replace(" ", "").replace(",", ".")
+    try:
+        value = float(raw_value)
+        if value <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("🎄🚫 Некорректная сумма, введите число больше 0")
+        return WAIT_BOT_BALANCE
+
+    bot_id = context.user_data.pop("bot_balance_bot_id", None)
+    action = context.user_data.pop("bot_balance_action", None)
+    owner_id = context.user_data.pop("bot_balance_owner_id", None)
+
+    if not bot_id or action not in {"add", "sub"}:
+        await update.message.reply_text("Бот не выбран", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+
+    bot = get_bot_by_id(bot_id)
+    if not bot:
+        await update.message.reply_text("Бот не найден", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+
+    current = float(bot.get("pending_reward") or 0)
+    delta = value if action == "add" else -value
+    new_value = round(max(0, current + delta), 2)
+    set_bot_reward(bot_id, new_value)
+
+    action_text = "добавлено" if action == "add" else "списано"
+    title = bot.get("title") or "бот"
+    await update.message.reply_text(
+        f"🎁 {action_text.capitalize()} {value:.2f} ₽. Новый баланс «{title}»: {new_value:.2f} ₽."
+    )
+
+    if owner_id:
+        bots = list_user_bots(owner_id)
+        if bots:
+            summary = build_owner_summary(owner_id, bots)
+            await update.message.reply_text(summary, reply_markup=admin_owner_keyboard(owner_id, bots))
+            return ConversationHandler.END
+
+    await update.message.reply_text("Возврат в админ-панель", reply_markup=admin_panel_keyboard())
+    return ConversationHandler.END
 
 
 @admin_only
@@ -3140,7 +3239,7 @@ def configure_application(app):
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
@@ -3152,6 +3251,7 @@ def configure_application(app):
                 )
             ],
             WAIT_REPLACEMENT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_replacement_save)],
+            WAIT_BOT_BALANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_bot_balance_update)],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
@@ -3176,7 +3276,7 @@ def configure_application(app):
     app.add_handler(payment_conv)
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
 
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
@@ -3244,6 +3344,10 @@ def configure_application(app):
             await help_menu(update, context)
         elif text == ORDER_BTN:
             await order_menu(update, context)
+        elif text == FAQ_BTN:
+            await update.message.reply_text(
+                "Откройте ответы на частые вопросы:", reply_markup=faq_keyboard()
+            )
         elif text == BACK_BTN:
             await update.message.reply_text(
                 "Возврат в главное меню",
