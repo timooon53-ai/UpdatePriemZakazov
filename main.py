@@ -2172,43 +2172,37 @@ async def notify_admins(context, order_id):
 
     text = "\n".join(parts)
 
-    async def send_to_admin(admin_id: int, bot: Bot):
-        if order.get("screenshot_path"):
-            with open(order.get("screenshot_path"), "rb") as photo:
-                await bot.send_photo(
-                    admin_id,
-                    photo=photo,
-                    caption=text,
-                    reply_markup=admin_order_buttons(order_id),
-                )
-        else:
-            await bot.send_message(
-                admin_id,
-                text,
-                reply_markup=admin_order_buttons(order_id),
-            )
-
     for admin_id in ADMIN_IDS:
         try:
-            order_bot = get_order_bot(order)
-            sent = False
-
-            for bot in (order_bot, primary_bot):
+            screenshot_path = order.get("screenshot_path")
+            keyboard = admin_order_buttons(order_id)
+            if screenshot_path and os.path.exists(screenshot_path):
                 try:
-                    await send_to_admin(admin_id, bot)
-                    sent = True
-                    break
-                except Exception as bot_error:
+                    with open(screenshot_path, "rb") as photo:
+                        await primary_bot.send_photo(
+                            admin_id,
+                            photo=photo,
+                            caption=text,
+                            reply_markup=keyboard,
+                        )
+                except Exception as photo_error:
                     logger.error(
-                        "Ошибка уведомления админа %s через бота %s: %s",
+                        "Не удалось отправить фото заказа %s админу %s: %s",
+                        order_id,
                         admin_id,
-                        getattr(bot, "token", "unknown"),
-                        bot_error,
+                        photo_error,
                     )
-                    await asyncio.sleep(1)
-
-            if not sent:
-                raise RuntimeError("Не удалось отправить уведомление ни одним ботом")
+                    await primary_bot.send_message(
+                        admin_id,
+                        text,
+                        reply_markup=keyboard,
+                    )
+            else:
+                await primary_bot.send_message(
+                    admin_id,
+                    text,
+                    reply_markup=keyboard,
+                )
         except Exception as e:
             logger.error(f"Ошибка уведомления админа {admin_id}: {e}")
 
