@@ -418,6 +418,7 @@ def add_user_to_bot_db(tg_id: int, username: str | None, bot_token: str | None):
         return
     bot_db = get_bot_db_path(bot_token)
     init_db(bot_db)
+    log_franchise_user_by_token(bot_token, tg_id, username)
     with sqlite3.connect(bot_db) as conn:
         c = conn.cursor()
         c.execute(
@@ -537,6 +538,9 @@ def add_user_bot(
             (owner_id, token, db_path_str, title),
         )
         conn.commit()
+        c.execute("SELECT id FROM user_bots WHERE token=?", (token,))
+        row = c.fetchone()
+        return row[0] if row else None
 
 
 def list_user_bots(owner_id: int):
@@ -614,6 +618,66 @@ def get_bot_link(token: str, fallback_title: str | None = None) -> str:
     return link
 
 
+def franchise_table_name(bot_id: int) -> str:
+    return str(bot_id)
+
+
+def ensure_franchise_table(bot_id: int):
+    if not bot_id:
+        return
+    table = franchise_table_name(bot_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute(
+            f'CREATE TABLE IF NOT EXISTS "{table}" (tg_id INTEGER PRIMARY KEY, username TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)'
+        )
+        conn.commit()
+
+
+def log_franchise_user_by_token(bot_token: str | None, tg_id: int, username: str | None):
+    if not bot_token:
+        return
+    bot_record = get_bot_by_token(bot_token)
+    if not bot_record:
+        return
+    bot_id = bot_record.get("id")
+    if not bot_id:
+        return
+    ensure_franchise_table(bot_id)
+    table = franchise_table_name(bot_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute(
+            f'INSERT OR IGNORE INTO "{table}" (tg_id, username) VALUES (?, ?)',
+            (tg_id, username),
+        )
+        conn.commit()
+
+
+def ensure_all_franchise_tables():
+    bots = list_all_bots()
+    created = []
+    for bot in bots:
+        token = bot.get("token")
+        if not token or token == PRIMARY_BOT_TOKEN:
+            continue
+        bot_id = bot.get("id")
+        if not bot_id:
+            continue
+        ensure_franchise_table(bot_id)
+        created.append(bot_id)
+    return created
+
+
+def count_franchise_users(bot_id: int) -> int:
+    table = franchise_table_name(bot_id)
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute(f'SELECT COUNT(*) FROM "{table}"')
+        row = c.fetchone()
+        return row[0] if row else 0
+
+
 def delete_user_bot(bot_id: int, owner_id: int):
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
@@ -684,7 +748,11 @@ def create_bot_storage(token: str, owner_id: int, title: str | None = None):
     init_db(db_path)
     set_setting("bot_owner", str(owner_id), db_path=db_path)
     set_setting("bot_token", token, db_path=db_path)
-    add_user_bot(owner_id, token, str(db_path), title)
+    bot_id = add_user_bot(owner_id, token, str(db_path), title)
+    if not bot_id:
+        bot_record = get_bot_by_token(token)
+        bot_id = bot_record.get("id") if bot_record else None
+    ensure_franchise_table(bot_id) if bot_id else None
     logger.info("Создано хранилище для бота %s в %s", token, db_path)
     return db_path
 
@@ -1377,6 +1445,7 @@ def admin_panel_keyboard():
         [InlineKeyboardButton("🎁 Заказы пользователя", callback_data="admin_orders")],
         [InlineKeyboardButton("🔔 Обновить информацию", callback_data="admin_refresh")],
         [InlineKeyboardButton("📡 Все боты", callback_data="admin_all_bots")],
+        [InlineKeyboardButton("🗂️ БД франшизы", callback_data="admin_franchise_db")],
         [InlineKeyboardButton("🎺 Рассылка по всем", callback_data="admin_broadcast")],
         [InlineKeyboardButton("👥 Кол-во пользователей", callback_data="admin_users_count")],
         [InlineKeyboardButton("📂 Выгрузить БД", callback_data="admin_dump_db")],
@@ -2599,6 +2668,32 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📡 Подключённые боты по владельцам:", reply_markup=admins_bots_keyboard()
         )
         return ConversationHandler.END
+    elif data == "admin_franchise_db":
+        bots = list_all_bots()
+        connected_bots = [b for b in bots if b.get("token") and b.get("token") != PRIMARY_BOT_TOKEN]
+        if not connected_bots:
+            await query.message.reply_text("Подключённых ботов нет.", reply_markup=admin_panel_keyboard())
+            return ConversationHandler.END
+        ensure_all_franchise_tables()
+        total_users = 0
+        lines = ["🗂️ Статус БД франшизы:"]
+        for bot in connected_bots:
+            bot_id = bot.get("id")
+            title = bot.get("title") or "Без названия"
+            if not bot_id:
+                lines.append(f"🤖 {title}: не удалось определить ID")
+                continue
+            try:
+                count = count_franchise_users(bot_id)
+            except Exception as e:
+                logger.error("Не удалось подсчитать пользователей для бота %s: %s", bot_id, e)
+                lines.append(f"🤖 {title}: ошибка подсчёта пользователей")
+                continue
+            total_users += count
+            lines.append(f"🤖 {title}: {count} пользователей в отдельной таблице {franchise_table_name(bot_id)}")
+        lines.append(f"🧾 Итого пользователей во франшизе: {total_users}")
+        await query.message.reply_text("\n".join(lines), reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
     elif data == "admin_users_count":
         bots = list_all_bots()
         lines = []
@@ -3239,7 +3334,7 @@ def configure_application(app):
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
@@ -3276,7 +3371,7 @@ def configure_application(app):
     app.add_handler(payment_conv)
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
 
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
