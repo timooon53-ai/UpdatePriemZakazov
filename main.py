@@ -22,7 +22,7 @@ REQUIRED_CHANNEL = -1003460665929
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton, Bot, ReplyKeyboardRemove, ForceReply,
+    ReplyKeyboardMarkup, KeyboardButton, Bot, ReplyKeyboardRemove, ForceReply, InputFile,
 )
 from telegram.constants import ChatAction
 from telegram.error import Forbidden, InvalidToken
@@ -1339,6 +1339,9 @@ def admin_panel_keyboard():
         [InlineKeyboardButton("🔔 Обновить информацию", callback_data="admin_refresh")],
         [InlineKeyboardButton("📡 Все боты", callback_data="admin_all_bots")],
         [InlineKeyboardButton("🎺 Рассылка по всем", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("👥 Кол-во пользователей", callback_data="admin_users_count")],
+        [InlineKeyboardButton("📂 Выгрузить БД", callback_data="admin_dump_db")],
+        [InlineKeyboardButton("🔄 Перезапуск ботов", callback_data="admin_restart_bots")],
         [InlineKeyboardButton("🔔 Заказы для подмены", callback_data="admin_replacements")],
         [InlineKeyboardButton("🧹 Очистить подмены", callback_data="admin_podmena_clear")],
         [InlineKeyboardButton(ordering_label, callback_data="admin_toggle")],
@@ -2536,6 +2539,45 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📡 Подключённые боты по владельцам:", reply_markup=admins_bots_keyboard()
         )
         return ConversationHandler.END
+    elif data == "admin_users_count":
+        bots = list_all_bots()
+        lines = []
+        seen_tokens = set()
+        total_users = 0
+        primary_count = count_bot_users(PRIMARY_BOT_TOKEN)
+        lines.append(f"👑 Основной бот: {primary_count} пользователей")
+        total_users += primary_count
+        for bot in bots:
+            token = bot.get("token")
+            if not token or token in seen_tokens or token == PRIMARY_BOT_TOKEN:
+                continue
+            seen_tokens.add(token)
+            count = count_bot_users(token)
+            total_users += count
+            title = bot.get("title") or "Без названия"
+            lines.append(f"🤖 {title}: {count} пользователей")
+        lines.append(f"Итого по всем: {total_users}")
+        await query.message.reply_text("\n".join(lines), reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+    elif data == "admin_dump_db":
+        db_file = Path(DB_PATH)
+        if not db_file.exists():
+            await query.message.reply_text("База данных не найдена", reply_markup=admin_panel_keyboard())
+            return ConversationHandler.END
+        try:
+            await query.message.reply_document(
+                document=InputFile(db_file.open("rb"), filename=db_file.name),
+                caption="Актуальная база данных",
+            )
+        except Exception as e:
+            logger.error("Не удалось отправить БД: %s", e)
+            await query.message.reply_text("Не удалось отправить БД", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+    elif data == "admin_restart_bots":
+        await query.message.reply_text("Перезапускаю всех ботов...", reply_markup=admin_panel_keyboard())
+        await restart_all_bots()
+        await query.message.reply_text("Перезапуск завершён", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
     elif data.startswith("admin_owner_"):
         owner_id = int(data.rsplit("_", 1)[1])
         bots = list_user_bots(owner_id)
@@ -2895,16 +2937,18 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     failed = 0
     blocked = 0
 
-    bots = list_all_bots()
-    if not bots:
-        await status_message.edit_text("Нет подключённых ботов", reply_markup=admin_panel_keyboard())
-        return ConversationHandler.END
+    bots = [{"token": PRIMARY_BOT_TOKEN, "db_path": DB_PATH, "title": "Основной"}]
+    bots.extend(list_all_bots())
 
+    seen_tokens = set()
     for bot_record in bots:
         token = bot_record.get("token")
+        if not token or token in seen_tokens:
+            continue
+        seen_tokens.add(token)
         db_path = bot_record.get("db_path") or DB_PATH
         try:
-            bot_instance = Bot(token=token)
+            bot_instance = Bot(token=token, request=HTTPXRequest(**REQUEST_TIMEOUTS))
         except InvalidToken as e:
             await notify_admins_invalid_bot(token, str(e), bot_record.get("owner_id"))
             delete_bot_by_token(token)
@@ -3102,7 +3146,7 @@ def configure_application(app):
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
@@ -3138,7 +3182,7 @@ def configure_application(app):
     app.add_handler(payment_conv)
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_podmena_clear|payapprove_|paydecline_|botreset_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_)"))
 
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
@@ -3217,7 +3261,7 @@ def configure_application(app):
 
 async def launch_bot(token: str):
     try:
-        app = ApplicationBuilder().token(token).build()
+        app = ApplicationBuilder().token(token).request(HTTPXRequest(**REQUEST_TIMEOUTS)).build()
     except InvalidToken as e:
         bot_record = delete_bot_by_token(token)
         owner_id = bot_record.get("owner_id") if bot_record else None
@@ -3256,6 +3300,8 @@ async def launch_bot(token: str):
 
 
 async def ensure_bot_running(token: str):
+    if not token:
+        return
     if token in RUNNING_BOTS:
         return
     loop = asyncio.get_running_loop()
@@ -3290,11 +3336,30 @@ async def stop_bot(token: str):
         logger.info(f"Бот {token} остановлен и удалён из списка")
 
 
+async def restart_all_bots():
+    tokens = {PRIMARY_BOT_TOKEN}
+    if TOKEN:
+        tokens.add(TOKEN)
+    for bot in list_all_bots():
+        if bot.get("token"):
+            tokens.add(bot.get("token"))
+
+    for token in list(RUNNING_BOTS.keys()):
+        await stop_bot(token)
+
+    await asyncio.sleep(1)
+
+    for token in tokens:
+        await ensure_bot_running(token)
+
+
 async def main_async():
     init_db()
     init_podmena_db()
     add_user_bot(0, PRIMARY_BOT_TOKEN, DB_PATH, "Основной бот")
-    tokens = {TOKEN, PRIMARY_BOT_TOKEN}
+    tokens = {PRIMARY_BOT_TOKEN}
+    if TOKEN:
+        tokens.add(TOKEN)
     for bot in list_all_bots():
         if bot.get("token"):
             tokens.add(bot.get("token"))
