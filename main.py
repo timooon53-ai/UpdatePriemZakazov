@@ -201,13 +201,23 @@ def init_db(db_path=DB_PATH):
                 balance REAL DEFAULT 0.00,
                 orders_count INTEGER DEFAULT 0,
                 coefficient REAL DEFAULT 0.55,
-                city TEXT
+                city TEXT,
+                referral_code TEXT,
+                referred_by INTEGER,
+                referral_balance REAL DEFAULT 0.00
             )
         """)
 
         existing_columns = {row[1] for row in c.execute("PRAGMA table_info(users)").fetchall()}
         if "city" not in existing_columns:
             c.execute("ALTER TABLE users ADD COLUMN city TEXT")
+        if "referral_code" not in existing_columns:
+            c.execute("ALTER TABLE users ADD COLUMN referral_code TEXT")
+        if "referred_by" not in existing_columns:
+            c.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+        if "referral_balance" not in existing_columns:
+            c.execute("ALTER TABLE users ADD COLUMN referral_balance REAL DEFAULT 0.00")
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_referral_code ON users(referral_code)")
 
         c.execute("""
             CREATE TABLE IF NOT EXISTS orders (
@@ -325,6 +335,23 @@ def init_db(db_path=DB_PATH):
 
         c.execute(
             """
+            CREATE TABLE IF NOT EXISTS referral_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                referrer_id INTEGER,
+                referred_user_id INTEGER,
+                order_id INTEGER,
+                amount REAL,
+                base_amount REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_referral_history_referrer ON referral_history(referrer_id)"
+        )
+
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS user_bots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 owner_id INTEGER,
@@ -438,6 +465,121 @@ def get_user(tg_id):
         c.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,))
         row = c.fetchone()
         return dict(row) if row else None
+
+
+def ensure_referral_code(tg_id: int) -> str:
+    with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("SELECT referral_code FROM users WHERE tg_id=?", (tg_id,))
+        row = c.fetchone()
+        if row and row[0]:
+            return row[0]
+
+        base_code = f"u{tg_id:x}"
+        code = base_code
+        suffix = 0
+        while True:
+            c.execute("SELECT tg_id FROM users WHERE referral_code=?", (code,))
+            existing = c.fetchone()
+            if not existing:
+                break
+            suffix += 1
+            code = f"{base_code}{suffix}"
+
+        c.execute("UPDATE users SET referral_code=? WHERE tg_id=?", (code, tg_id))
+        conn.commit()
+        return code
+
+
+def get_user_by_referral_code(code: str):
+    if not code:
+        return None
+    with sqlite3.connect(USERS_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE referral_code=?", (code,))
+        row = c.fetchone()
+        return dict(row) if row else None
+
+
+def set_user_referrer(tg_id: int, referral_code: str | None):
+    if not referral_code:
+        return None
+    with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("SELECT referred_by FROM users WHERE tg_id=?", (tg_id,))
+        existing = c.fetchone()
+        if existing and existing[0]:
+            return existing[0]
+
+        referrer = get_user_by_referral_code(referral_code)
+        if not referrer or referrer.get("tg_id") == tg_id:
+            return None
+
+        referrer_id = referrer["tg_id"]
+        c.execute(
+            "UPDATE users SET referred_by=? WHERE tg_id=? AND (referred_by IS NULL OR referred_by=0)",
+            (referrer_id, tg_id),
+        )
+        conn.commit()
+        return referrer_id
+
+
+def count_user_referrals(referrer_id: int) -> int:
+    with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM users WHERE referred_by=?", (referrer_id,))
+        row = c.fetchone()
+        return row[0] if row else 0
+
+
+def add_referral_reward(referrer_id: int, referred_user_id: int, base_amount: float, order_id: int | None) -> float:
+    if not referrer_id or base_amount is None:
+        return 0.0
+    reward = round(base_amount * 0.05, 2)
+    if reward <= 0:
+        return 0.0
+    with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE users SET referral_balance = ROUND(COALESCE(referral_balance, 0) + ?, 2) WHERE tg_id=?",
+            (reward, referrer_id),
+        )
+        c.execute(
+            """
+            INSERT INTO referral_history (referrer_id, referred_user_id, order_id, amount, base_amount)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (referrer_id, referred_user_id, order_id, reward, base_amount),
+        )
+        conn.commit()
+    return reward
+
+
+def get_referral_history(referrer_id: int, limit: int = 10):
+    with sqlite3.connect(USERS_DB) as conn:
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT * FROM referral_history
+            WHERE referrer_id=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (referrer_id, limit),
+        )
+        return [dict(row) for row in c.fetchall()]
+
+
+def build_referral_link(code: str) -> str:
+    if not code:
+        return ""
+    base_link = get_bot_link(PRIMARY_BOT_TOKEN)
+    if base_link.startswith("https://t.me/"):
+        separator = "&" if "?" in base_link else "?"
+        return f"{base_link}{separator}start={code}"
+    return f"{base_link} (код: {code})"
 
 def increment_orders_count(tg_id):
     with sqlite3.connect(USERS_DB) as conn:
@@ -1190,7 +1332,6 @@ def main_menu_keyboard(user_id=None):
         [KeyboardButton(PROFILE_BTN)],
         [KeyboardButton(ORDER_BTN)],
         [KeyboardButton(HELP_BTN)],
-        [KeyboardButton(FAQ_BTN)],
     ]
     if user_id in ADMIN_IDS:
         buttons.append([KeyboardButton(ADMIN_BTN)])
@@ -1206,7 +1347,10 @@ def start_links_keyboard():
             InlineKeyboardButton("🎄 Канал", url=CHANNEL_URL),
             InlineKeyboardButton("✨ Оператор", url=OPERATOR_URL),
         ],
-        [InlineKeyboardButton("❄️ Чат", url=CHAT_URL)],
+        [
+            InlineKeyboardButton("❄️ Чат", url=CHAT_URL),
+            InlineKeyboardButton("📚 FAQ", url=FAQ_URL),
+        ],
     ]
     return InlineKeyboardMarkup(buttons)
 
@@ -1228,9 +1372,19 @@ def profile_keyboard(has_city: bool, has_favorites: bool):
 
     fav_row = [InlineKeyboardButton("❄️ Любимые адреса", callback_data="profile_fav_manage")]
     buttons.append(fav_row)
+    buttons.append([InlineKeyboardButton("🎁 Реферальная программа", callback_data="profile_referral")])
     buttons.append([InlineKeyboardButton("🎄 Добавить своего бота", callback_data="profile_bots")])
     buttons.append([InlineKeyboardButton("🎄 В главное меню", callback_data="profile_back")])
     return InlineKeyboardMarkup(buttons)
+
+
+def referral_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📜 История начислений", callback_data="profile_ref_history")],
+            [InlineKeyboardButton("🎄 Назад в профиль", callback_data="profile_ref_back")],
+        ]
+    )
 
 
 def favorites_manage_keyboard(favorites):
@@ -1538,8 +1692,11 @@ def not_banned(func):
 @not_banned
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    referral_arg = context.args[0] if getattr(context, "args", None) else None
     add_user(user.id, user.username)
     add_user_to_bot_db(user.id, user.username, context.bot.token)
+    ensure_referral_code(user.id)
+    set_user_referrer(user.id, referral_arg)
     target = update.effective_message
     if target:
         await target.reply_text(
@@ -1581,6 +1738,13 @@ async def send_profile_info(target, user_id, context):
     coefficient = user["coefficient"]
     city = user["city"]
     user_bots = list_user_bots(user_id)
+    referral_code = ensure_referral_code(user_id)
+    referral_link = build_referral_link(referral_code)
+    referral_balance = float(user.get("referral_balance") or 0)
+    referrer_id = user.get("referred_by")
+    referrer = get_user(referrer_id) if referrer_id else None
+    referrer_label = f"@{referrer.get('username')}" if referrer and referrer.get("username") else (str(referrer_id) if referrer_id else "—")
+    referral_count = count_user_referrals(user_id)
 
     favorites = get_favorite_addresses(user_id)
     favorites_text = "\n".join([f"{idx + 1}. {fav['address']}" for idx, fav in enumerate(favorites)]) or "—"
@@ -1592,6 +1756,11 @@ async def send_profile_info(target, user_id, context):
         f"Заказано поездок: {orders_count}\n"
         f"Коэффициент: {coefficient:.2f}\n"
         f"Город: {city or 'не указан'}\n"
+        f"Реферальный счёт: {referral_balance:.2f} ₽\n"
+        f"Ваш ref-код: {referral_code}\n"
+        f"Реферальная ссылка: {referral_link}\n"
+        f"Приглашено друзей: {referral_count}\n"
+        f"Вас пригласил: {referrer_label}\n"
         f"Подключённых ботов: {len(user_bots)}\n"
         f"Любимые адреса:\n{favorites_text}"
     )
@@ -1746,6 +1915,39 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             "Возврат в главное меню", reply_markup=main_menu_keyboard(user_id)
         )
+    elif data == "profile_referral":
+        user = get_user(user_id) or {}
+        referral_code = ensure_referral_code(user_id)
+        link = build_referral_link(referral_code)
+        invited = count_user_referrals(user_id)
+        balance = float(user.get("referral_balance") or 0)
+        ref_text = (
+            "🎁 Реферальная программа\n"
+            f"Реферальный баланс: {balance:.2f} ₽\n"
+            f"Код для друзей: {referral_code}\n"
+            f"Ссылка: {link}\n"
+            f"Приглашено друзей: {invited}\n\n"
+            "Передайте ссылку другу — когда он закажет поездку, вы получите 5% от суммы."
+        )
+        await query.message.reply_text(ref_text, reply_markup=referral_keyboard())
+    elif data == "profile_ref_history":
+        history = get_referral_history(user_id, limit=10)
+        if not history:
+            text = "Пока нет начислений по рефералке."
+        else:
+            parts = ["📜 История реферальных начислений:"]
+            for item in history:
+                friend = get_user(item.get("referred_user_id"))
+                friend_label = f"@{friend.get('username')}" if friend and friend.get("username") else (str(item.get("referred_user_id")) or "—")
+                order_part = f"за заказ №{item.get('order_id')}" if item.get("order_id") else ""
+                created = item.get("created_at") or ""
+                parts.append(
+                    f"{created}: {item.get('amount') or 0:.2f} ₽ {order_part} от {friend_label}"
+                )
+            text = "\n".join(parts)
+        await query.message.reply_text(text, reply_markup=referral_keyboard())
+    elif data == "profile_ref_back":
+        await send_profile_info(query.message, user_id, context)
     elif data == "profile_fav_manage":
         favorites = get_favorite_addresses(user_id)
         await query.message.reply_text(
@@ -3158,6 +3360,19 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
     updated_order.update({"id": order_id, "amount": total, "base_amount": amount})
     order_bot = get_order_bot(order)
     await send_payment_menu(updated_order, order_bot)
+
+    referral_reward = 0
+    referrer_id = (user or {}).get("referred_by")
+    if referrer_id:
+        referral_reward = add_referral_reward(referrer_id, tg_id, amount, order_id)
+        if referral_reward:
+            try:
+                await primary_bot.send_message(
+                    referrer_id,
+                    f"🎁 Вам начислено {referral_reward:.2f} ₽ за заказ друга №{order_id}. Спасибо, что приглашаете друзей!",
+                )
+            except Exception as e:
+                logger.warning("Не удалось уведомить реферера %s: %s", referrer_id, e)
 
     bot_token = order.get("bot_token") or PRIMARY_BOT_TOKEN
     bot_record = get_bot_by_token(bot_token)
