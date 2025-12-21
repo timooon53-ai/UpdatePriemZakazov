@@ -9,6 +9,7 @@ import random
 import time
 import warnings
 import shutil
+import uuid
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -359,6 +360,7 @@ def init_db(db_path=DB_PATH):
                 db_path TEXT,
                 title TEXT,
                 pending_reward REAL DEFAULT 0,
+                franchise_id TEXT UNIQUE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -369,8 +371,25 @@ def init_db(db_path=DB_PATH):
             c.execute("ALTER TABLE user_bots ADD COLUMN title TEXT")
         if "pending_reward" not in bot_columns:
             c.execute("ALTER TABLE user_bots ADD COLUMN pending_reward REAL DEFAULT 0")
+        if "franchise_id" not in bot_columns:
+            c.execute("ALTER TABLE user_bots ADD COLUMN franchise_id TEXT UNIQUE")
+
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS franchise_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                franchise_id TEXT,
+                bot_id INTEGER,
+                tg_id INTEGER,
+                username TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(franchise_id, tg_id)
+            )
+            """
+        )
 
         conn.commit()
+    backfill_franchise_ids(db_path)
 
 
 def init_podmena_db(db_path=PODMENA_DB_PATH):
@@ -662,25 +681,60 @@ def calc_owner_earnings(bot_token: str) -> float:
         return round(total * 0.15, 2)
 
 
+def generate_franchise_id() -> str:
+    return f"fr_{uuid.uuid4().hex[:12]}"
+
+
+def ensure_unique_franchise_id(candidate: str | None, cursor: sqlite3.Cursor) -> str:
+    existing_ids = {
+        row[0]
+        for row in cursor.execute(
+            "SELECT franchise_id FROM user_bots WHERE franchise_id IS NOT NULL AND franchise_id!=''"
+        ).fetchall()
+        if row[0]
+    }
+    value = candidate or generate_franchise_id()
+    while value in existing_ids:
+        value = generate_franchise_id()
+    return value
+
+
+def backfill_franchise_ids(db_path=DB_PATH):
+    with sqlite3.connect(db_path) as conn:
+        c = conn.cursor()
+        missing = c.execute(
+            "SELECT id FROM user_bots WHERE franchise_id IS NULL OR franchise_id=''"
+        ).fetchall()
+        if not missing:
+            return
+        for row in missing:
+            bot_id = row[0]
+            new_id = ensure_unique_franchise_id(None, c)
+            c.execute("UPDATE user_bots SET franchise_id=? WHERE id=?", (new_id, bot_id))
+        conn.commit()
+
+
 def add_user_bot(
     owner_id: int, token: str, db_path: str | os.PathLike[str], title: str | None = None
 ):
     db_path_str = str(db_path)
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
+        franchise_id = ensure_unique_franchise_id(None, c)
         c.execute(
             """
-            INSERT INTO user_bots (owner_id, token, db_path, title)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO user_bots (owner_id, token, db_path, title, franchise_id)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(token) DO UPDATE SET
                 owner_id=excluded.owner_id,
                 db_path=excluded.db_path,
-                title=excluded.title
+                title=excluded.title,
+                franchise_id=COALESCE(user_bots.franchise_id, excluded.franchise_id)
             """,
-            (owner_id, token, db_path_str, title),
+            (owner_id, token, db_path_str, title, franchise_id),
         )
         conn.commit()
-        c.execute("SELECT id FROM user_bots WHERE token=?", (token,))
+        c.execute("SELECT id, franchise_id FROM user_bots WHERE token=?", (token,))
         row = c.fetchone()
         return row[0] if row else None
 
@@ -708,6 +762,48 @@ def get_bot_by_id(bot_id: int):
         c.execute("SELECT * FROM user_bots WHERE id=?", (bot_id,))
         row = c.fetchone()
         return dict(row) if row else None
+
+
+def ensure_bot_franchise_id(bot_record: dict | None) -> str | None:
+    if not bot_record:
+        return None
+    franchise_id = bot_record.get("franchise_id")
+    if franchise_id:
+        return franchise_id
+    bot_id = bot_record.get("id")
+    if not bot_id:
+        return None
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        new_id = ensure_unique_franchise_id(None, c)
+        c.execute("UPDATE user_bots SET franchise_id=? WHERE id=?", (new_id, bot_id))
+        conn.commit()
+        return new_id
+
+
+def log_franchise_user(
+    franchise_id: str | None, bot_id: int | None, tg_id: int, username: str | None, conn: sqlite3.Connection | None = None
+):
+    if not franchise_id:
+        return
+    close_conn = False
+    if conn is None:
+        conn = sqlite3.connect(DB_PATH)
+        close_conn = True
+    try:
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO franchise_users (franchise_id, bot_id, tg_id, username)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(franchise_id, tg_id) DO UPDATE SET username=COALESCE(excluded.username, franchise_users.username)
+            """,
+            (franchise_id, bot_id, tg_id, username),
+        )
+        conn.commit()
+    finally:
+        if close_conn:
+            conn.close()
 
 
 def add_bot_reward(bot_token: str, amount: float):
@@ -783,16 +879,21 @@ def log_franchise_user_by_token(bot_token: str | None, tg_id: int, username: str
     if not bot_record:
         return
     bot_id = bot_record.get("id")
-    if not bot_id:
+    franchise_id = ensure_bot_franchise_id(bot_record)
+    if not bot_id and not franchise_id:
         return
-    ensure_franchise_table(bot_id)
-    table = franchise_table_name(bot_id)
+    if bot_id:
+        ensure_franchise_table(bot_id)
+    table = franchise_table_name(bot_id) if bot_id else None
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
-        c.execute(
-            f'INSERT OR IGNORE INTO "{table}" (tg_id, username) VALUES (?, ?)',
-            (tg_id, username),
-        )
+        if table:
+            c.execute(
+                f'INSERT OR IGNORE INTO "{table}" (tg_id, username) VALUES (?, ?)',
+                (tg_id, username),
+            )
+        if franchise_id:
+            log_franchise_user(franchise_id, bot_id, tg_id, username, conn=conn)
         conn.commit()
 
 
@@ -800,6 +901,7 @@ def ensure_all_franchise_tables():
     bots = list_all_bots()
     created = []
     for bot in bots:
+        ensure_bot_franchise_id(bot)
         token = bot.get("token")
         if not token or token == PRIMARY_BOT_TOKEN:
             continue
@@ -812,9 +914,17 @@ def ensure_all_franchise_tables():
 
 
 def count_franchise_users(bot_id: int) -> int:
+    bot_record = get_bot_by_id(bot_id)
+    franchise_id = ensure_bot_franchise_id(bot_record) if bot_record else None
     table = franchise_table_name(bot_id)
+    ensure_franchise_table(bot_id)
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
+        if franchise_id:
+            c.execute("SELECT COUNT(*) FROM franchise_users WHERE franchise_id=?", (franchise_id,))
+            row = c.fetchone()
+            if row:
+                return row[0]
         c.execute(f'SELECT COUNT(*) FROM "{table}"')
         row = c.fetchone()
         return row[0] if row else 0
@@ -891,6 +1001,14 @@ def create_bot_storage(token: str, owner_id: int, title: str | None = None):
     set_setting("bot_owner", str(owner_id), db_path=db_path)
     set_setting("bot_token", token, db_path=db_path)
     bot_id = add_user_bot(owner_id, token, str(db_path), title)
+    franchise_id = None
+    try:
+        bot_record = get_bot_by_token(token)
+        franchise_id = ensure_bot_franchise_id(bot_record)
+    except Exception as e:
+        logger.warning("Не удалось зафиксировать franchise_id для бота %s: %s", token, e)
+    if franchise_id:
+        set_setting("franchise_id", franchise_id, db_path=db_path)
     if not bot_id:
         bot_record = get_bot_by_token(token)
         bot_id = bot_record.get("id") if bot_record else None
@@ -1656,11 +1774,13 @@ def build_owner_summary(owner_id: int, bots: list[dict]) -> str:
     lines = [f"🧑‍💻 Владелец: @{owner.get('username') or owner_id}"]
     for bot in bots:
         token = bot.get("token")
+        franchise_id = ensure_bot_franchise_id(bot)
         lines.append(
             "\n".join(
                 [
                     "🤖 Бот: " + (bot.get("title") or "Без названия"),
                     f"🔑 Токен: {token}",
+                    f"🆔 ID франшизы: {franchise_id or '—'}",
                     f"👥 Пользователи: {count_bot_users(token)}",
                     f"🧾 Заказы: {count_bot_orders(token)}",
                     f"🎁 Начислено (до вывода): {float(bot.get('pending_reward') or 0):.2f} ₽",
@@ -2885,6 +3005,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not bot_id:
                 lines.append(f"🤖 {title}: не удалось определить ID")
                 continue
+            franchise_id = ensure_bot_franchise_id(bot)
             try:
                 count = count_franchise_users(bot_id)
             except Exception as e:
@@ -2892,7 +3013,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"🤖 {title}: ошибка подсчёта пользователей")
                 continue
             total_users += count
-            lines.append(f"🤖 {title}: {count} пользователей в отдельной таблице {franchise_table_name(bot_id)}")
+            lines.append(
+                f"🤖 {title}: {count} пользователей "
+                f"(ID: {franchise_id or '—'}, таблица {franchise_table_name(bot_id)})"
+            )
         lines.append(f"🧾 Итого пользователей во франшизе: {total_users}")
         await query.message.reply_text("\n".join(lines), reply_markup=admin_panel_keyboard())
         return ConversationHandler.END
