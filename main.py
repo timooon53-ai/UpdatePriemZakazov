@@ -1332,7 +1332,6 @@ def main_menu_keyboard(user_id=None):
         [KeyboardButton(PROFILE_BTN)],
         [KeyboardButton(ORDER_BTN)],
         [KeyboardButton(HELP_BTN)],
-        [KeyboardButton(FAQ_BTN)],
     ]
     if user_id in ADMIN_IDS:
         buttons.append([KeyboardButton(ADMIN_BTN)])
@@ -1348,7 +1347,10 @@ def start_links_keyboard():
             InlineKeyboardButton("🎄 Канал", url=CHANNEL_URL),
             InlineKeyboardButton("✨ Оператор", url=OPERATOR_URL),
         ],
-        [InlineKeyboardButton("❄️ Чат", url=CHAT_URL)],
+        [
+            InlineKeyboardButton("❄️ Чат", url=CHAT_URL),
+            InlineKeyboardButton("📚 FAQ", url=FAQ_URL),
+        ],
     ]
     return InlineKeyboardMarkup(buttons)
 
