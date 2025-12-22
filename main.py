@@ -9,9 +9,6 @@ import random
 import time
 import warnings
 import shutil
-import json
-import re
-import uuid
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -23,26 +20,6 @@ DEFAULT_CHAT_URL = "https://t.me/+z_S1iZMVW-ZmMzBi"
 FAQ_URL = "https://telegra.ph/FAQ-12-19-16"
 
 REQUIRED_CHANNEL = -1003460665929
-
-YANDEX_TAXI_TOKEN = "y0_AgAAAAB1g7gdAAU0HAAAAAECOUIwAAAYjdKIuM9IEZ2DXVd1oG4LOWpPrg"
-
-TARIFF_CODE_MAP = {
-    "econom": "econom",
-    "business": "business",
-    "comfortplus": "comfortplus",
-    "vip": "vip",
-    "premier": "premier",
-    "maybach": "maybach",
-}
-TARIFF_RU_MAP = {
-    "эконом": "econom",
-    "комфорт": "business",
-    "комфорт+": "comfortplus",
-    "комфорт плюс": "comfortplus",
-    "бизнес": "vip",
-    "премьер": "premier",
-    "элит": "maybach",
-}
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -201,179 +178,9 @@ CHAT_URL = (os.getenv("CHAT_URL") or DEFAULT_CHAT_URL).strip()
 PROFILE_BTN = "Профиль ✨"
 ORDER_BTN = "Заказать такси 🎄🛷"
 HELP_BTN = "Помощь ❄️"
-PRICE_BTN = "Рассчитать цену"
 ADMIN_BTN = "Админка 🎅"
 BACK_BTN = "Назад ⛄️"
 FAQ_BTN = "FAQ 📚"
-
-def _random_reqid():
-    return f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
-
-
-def _yandex_headers(token: str = YANDEX_TAXI_TOKEN):
-    return {
-        "User-Agent": "ru.yandex.ytaxi/700.116.0.501961 (iPhone; iPhone13,2; iOS 18.6; Darwin)",
-        "Pragma": "no-cache",
-        "Accept": "*/*",
-        "Accept-Encoding": "gzip, deflate, br",
-        "X-YaTaxi-UserId": "08a2d06810664758a42dee25bb0220ec",
-        "X-Ya-Go-Superapp-Session": "06F16257-7919-4052-BB9A-B96D22FE9B79",
-        "X-YaTaxi-Last-Zone-Names": "moscow,omsk",
-        "X-Yandex-Jws": "eyJhbGciOiJIUzI1NiIsImtpZCI6Im5hcndoYWwiLCJ0eXAiOiJKV1QifQ.eyJkZXZpY2VfaW50ZWdyaXR5Ijp0cnVlLCJleHBpcmVzX2F0X21zIjoxNzY0NjUzNzcyNDY4LCJpcCI6IjJhMDI6NmI4OmMzNzo4YmE5OjdhMDA6NGMxYjozM2Q3OjAiLCJ0aW1lc3RhbXBfbXMiOjE3NjQ2NTAxNzI0NjgsInV1aWQiOiIxMmRjY2EzZGUwYmU0NDhjOGVmZDRmMmFiNjhiZjAwNyJ9.H8Izcf7uXk80ZFVKRElhDyabqcBVKTMsa45oeXQmgIs",
-        "Authorization": f"Bearer {token}",
-        "Accept-Language": "ru;q=1, ru-RU;q=0.9",
-        "Content-Type": "application/json",
-        "X-VPN-Active": "1",
-        "Connection": "keep-alive",
-        "X-Mob-ID": "c76e6e2552f348b898891dd672fa5daa",
-    }
-
-
-def _extract_point(value):
-    if isinstance(value, dict):
-        if "point" in value and isinstance(value["point"], (list, tuple)) and len(value["point"]) == 2:
-            return value["point"]
-        for v in value.values():
-            result = _extract_point(v)
-            if result:
-                return result
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            result = _extract_point(item)
-            if result:
-                return result
-    return None
-
-
-def yandex_suggest_point(part: str, token: str = YANDEX_TAXI_TOKEN, point_type: str = "a"):
-    url = "https://tc.mobile.yandex.net/4.0/persuggest/v1/suggest?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_V4_0"
-    payload = {
-        "type": point_type,
-        "part": part,
-        "client_reqid": _random_reqid(),
-        "session_info": {},
-        "action": "user_input",
-        "state": {
-            "selected_class": "econom",
-            "coord_providers": [],
-            "fields": [],
-            "l10n": {
-                "countries": {"system": ["RU"]},
-                "languages": {"system": ["ru-RU"], "app": ["ru"]},
-                "mapkit_lang_region": "ru_RU",
-            },
-            "screen": "main.addresses",
-            "main_screen_version": "flex_main",
-        },
-    }
-    try:
-        resp = requests.post(url, json=payload, headers=_yandex_headers(token), timeout=30)
-        resp.raise_for_status()
-        try:
-            data = resp.json()
-            point = _extract_point(data)
-            if point:
-                return point
-        except Exception:
-            pass
-
-        text = resp.text
-        match = re.search(r'"point"\s*:\s*\[\s*([0-9.\-]+)\s*,\s*([0-9.\-]+)\s*]', text)
-        if match:
-            return [float(match.group(1)), float(match.group(2))]
-        logger.error("Не удалось извлечь координаты для адреса %s. Ответ: %s", part, text[:500])
-    except Exception as e:
-        logger.error("Не удалось получить координаты по адресу %s: %s", part, e)
-        return None
-
-
-def _extract_price_from_node(node, tariff_class: str):
-    if isinstance(node, dict):
-        node_class = node.get("class")
-        if node_class == tariff_class:
-            if "price" in node and isinstance(node["price"], dict):
-                value = node["price"].get("value") or node["price"].get("amount") or node["price"].get("decimal_value")
-                if value is not None:
-                    try:
-                        return float(value)
-                    except (TypeError, ValueError):
-                        pass
-            for key in ("formatted_price", "value", "amount"):
-                value = node.get(key)
-                if isinstance(value, str):
-                    digits = re.findall(r"[0-9]+(?:[.,][0-9]+)?", value)
-                    if digits:
-                        try:
-                            return float(digits[0].replace(",", "."))
-                        except (TypeError, ValueError):
-                            pass
-                elif isinstance(value, (int, float)):
-                    return float(value)
-        for v in node.values():
-            price = _extract_price_from_node(v, tariff_class)
-            if price is not None:
-                return price
-    elif isinstance(node, (list, tuple)):
-        for item in node:
-            price = _extract_price_from_node(item, tariff_class)
-            if price is not None:
-                return price
-    return None
-
-
-def yandex_route_price(point_a, point_b, tariff_class: str, token: str = YANDEX_TAXI_TOKEN):
-    url = "https://tc.mobile.yandex.net/3.0/routestats?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_0"
-    payload = {
-        "supports_verticals_selector": True,
-        "id": uuid.uuid4().hex,
-        "supported_markup": "tml-0.1",
-        "selected_class": tariff_class,
-        "supported_verticals": ["taxi"],
-        "route": [point_a, point_b],
-        "payment": {"type": "cash"},
-        "zone_name": "moscow",
-        "account_type": "lite",
-        "summary_version": 2,
-        "format_currency": True,
-        "supports_multiclass": True,
-        "supported_vertical_types": ["group"],
-        "requirements": {},
-        "multiclass_options": {"selected": False, "class": [], "verticals": []},
-        "class": [tariff_class],
-    }
-    try:
-        resp = requests.post(url, json=payload, headers=_yandex_headers(token), timeout=30)
-        resp.raise_for_status()
-        try:
-            data = resp.json()
-            price = _extract_price_from_node(data, tariff_class)
-            if price is not None:
-                return price
-        except Exception:
-            pass
-
-        text = resp.text
-        pattern = rf'"pin_description"\s*:\s*"Отсюда[^"]*?([0-9]+(?:[.,][0-9]+)?)["\\s]*"\s*,\s*"class"\s*:\s*"{re.escape(tariff_class)}"'
-        match = re.search(pattern, text)
-        if match:
-            try:
-                return float(match.group(1).replace(",", "."))
-            except ValueError:
-                pass
-        logger.error("Не удалось извлечь стоимость маршрута для класса %s. Ответ: %s", tariff_class, text[:500])
-    except Exception as e:
-        logger.error("Не удалось получить стоимость маршрута: %s", e)
-    return None
-
-
-def calculate_route_price(address_from: str, address_to: str, tariff_class: str):
-    point_a = yandex_suggest_point(address_from, point_type="a")
-    point_b = yandex_suggest_point(address_to, point_type="b")
-    if not point_a or not point_b:
-        return None
-    return yandex_route_price(point_a, point_b, tariff_class)
-
-
 # ==========================
 # Инициализация БД
 # ==========================
@@ -1547,7 +1354,6 @@ def main_menu_keyboard(user_id=None):
     buttons = [
         [KeyboardButton(PROFILE_BTN)],
         [KeyboardButton(ORDER_BTN)],
-        [KeyboardButton(PRICE_BTN)],
         [KeyboardButton(HELP_BTN)],
     ]
     if user_id in ADMIN_IDS:
@@ -1574,17 +1380,6 @@ def start_links_keyboard():
 
 def faq_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("📚 FAQ", url=FAQ_URL)]])
-
-def price_tariff_keyboard():
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("econom"), KeyboardButton("business")],
-            [KeyboardButton("comfortplus"), KeyboardButton("vip")],
-            [KeyboardButton("premier"), KeyboardButton("maybach")],
-        ],
-        resize_keyboard=True,
-    )
-
 
 def taxi_force_reply_markup():
     return ForceReply(selective=True, input_field_placeholder="Такси от Майка")
@@ -2273,10 +2068,7 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_PAYMENT_PROOF,
     WAIT_BOT_BALANCE,
     WAIT_WITHDRAW_REQUISITES,
-    WAIT_PRICE_FROM,
-    WAIT_PRICE_TO,
-    WAIT_PRICE_TARIFF,
-) = range(22)
+) = range(19)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -2323,61 +2115,6 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=main_menu_keyboard(query.from_user.id),
         )
         return ConversationHandler.END
-
-# ---- Калькулятор цены ----
-PRICE_ADDRESS_HINT = (
-    "Пришлите адрес в формате:\n"
-    "Улица, дом, город/поселок/деревня\n"
-    "Например:\n"
-    "ул. Ленина, д. 20, г. Москва"
-)
-
-
-async def start_price_calculation(target, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["price_flow"] = {}
-    context.user_data["price_step"] = "from"
-    await target.reply_text(
-        f"Введите первый адрес.\n{PRICE_ADDRESS_HINT}",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-
-
-async def ask_second_price_address(target, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["price_step"] = "to"
-    await target.reply_text(
-        f"Теперь введите второй адрес.\n{PRICE_ADDRESS_HINT}",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-
-
-async def ask_price_tariff(target, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["price_step"] = "tariff"
-    await target.reply_text(
-        "Какой тариф нужен?\n"
-        "эконом - econom\n"
-        "комфорт - business\n"
-        "Комфорт+ - comfortplus\n"
-        "бизнес - vip\n"
-        "Премьер - premier\n"
-        "Элит - maybach",
-        reply_markup=price_tariff_keyboard(),
-    )
-
-
-async def show_price_result(target, base_price: float, tariff_class: str):
-    if base_price is None:
-        await target.reply_text(
-            "Не удалось получить стоимость. Попробуйте ещё раз позже или уточните адреса.",
-            reply_markup=main_menu_keyboard(target.from_user.id if hasattr(target, "from_user") else None),
-        )
-        return
-    discounted = round(base_price * 0.55, 2)
-    await target.reply_text(
-        f"Стоимость поездки ({tariff_class}):\n"
-        f"<s>{base_price:.2f} ₽</s> <b>{discounted:.2f} ₽</b> — оплата нам с учётом скидки",
-        parse_mode="HTML",
-        reply_markup=ReplyKeyboardRemove(),
-    )
 
 # ---- Клавиатура "Пропустить" ----
 def skip_keyboard():
@@ -3951,39 +3688,6 @@ def configure_application(app):
                 await update.message.reply_text("Бот не найден или доступ запрещён.")
             return
 
-        price_step = context.user_data.get("price_step")
-        if price_step:
-            price_flow = context.user_data.setdefault("price_flow", {})
-            if price_step == "from":
-                price_flow["from"] = text.strip()
-                await ask_second_price_address(update.message, context)
-                return
-            if price_step == "to":
-                price_flow["to"] = text.strip()
-                await ask_price_tariff(update.message, context)
-                return
-            if price_step == "tariff":
-                raw = text.strip().lower()
-                tariff_class = TARIFF_CODE_MAP.get(raw) or TARIFF_RU_MAP.get(raw) or raw
-                if tariff_class not in TARIFF_CODE_MAP.values():
-                    await update.message.reply_text(
-                        "Не понял тариф. Укажите один из: econom, business, comfortplus, vip, premier, maybach.",
-                        reply_markup=price_tariff_keyboard(),
-                    )
-                    return
-                address_from = price_flow.get("from")
-                address_to = price_flow.get("to")
-                context.user_data.pop("price_step", None)
-                context.user_data.pop("price_flow", None)
-                await update.message.reply_text("Считаю стоимость...", reply_markup=ReplyKeyboardRemove())
-                price = calculate_route_price(address_from, address_to, tariff_class)
-                await show_price_result(update.message, price, tariff_class)
-                await update.message.reply_text(
-                    "Возврат в главное меню",
-                    reply_markup=main_menu_keyboard(update.effective_user.id),
-                )
-                return
-
         if context.user_data.get("awaiting_city"):
             city = text.strip()
             update_user_city(user_id, city)
@@ -4046,8 +3750,6 @@ def configure_application(app):
             await help_menu(update, context)
         elif text == ORDER_BTN:
             await order_menu(update, context)
-        elif text == PRICE_BTN:
-            await start_price_calculation(update.message, context)
         elif text == FAQ_BTN:
             await update.message.reply_text(
                 "Откройте ответы на частые вопросы:", reply_markup=faq_keyboard()
