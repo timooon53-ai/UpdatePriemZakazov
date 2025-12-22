@@ -9,6 +9,9 @@ import random
 import time
 import warnings
 import shutil
+import json
+import re
+import uuid
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -20,6 +23,26 @@ DEFAULT_CHAT_URL = "https://t.me/+z_S1iZMVW-ZmMzBi"
 FAQ_URL = "https://telegra.ph/FAQ-12-19-16"
 
 REQUIRED_CHANNEL = -1003460665929
+
+YANDEX_TAXI_TOKEN = "y0_AgAAAAB1g7gdAAU0HAAAAAECOUIwAAAYjdKIuM9IEZ2DXVd1oG4LOWpPrg"
+
+TARIFF_CODE_MAP = {
+    "econom": "econom",
+    "business": "business",
+    "comfortplus": "comfortplus",
+    "vip": "vip",
+    "premier": "premier",
+    "maybach": "maybach",
+}
+TARIFF_RU_MAP = {
+    "эконом": "econom",
+    "комфорт": "business",
+    "комфорт+": "comfortplus",
+    "комфорт плюс": "comfortplus",
+    "бизнес": "vip",
+    "премьер": "premier",
+    "элит": "maybach",
+}
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -178,9 +201,108 @@ CHAT_URL = (os.getenv("CHAT_URL") or DEFAULT_CHAT_URL).strip()
 PROFILE_BTN = "Профиль ✨"
 ORDER_BTN = "Заказать такси 🎄🛷"
 HELP_BTN = "Помощь ❄️"
+PRICE_BTN = "Рассчитать цену"
 ADMIN_BTN = "Админка 🎅"
 BACK_BTN = "Назад ⛄️"
 FAQ_BTN = "FAQ 📚"
+
+def _random_reqid():
+    return f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
+
+
+def _yandex_headers(token: str = YANDEX_TAXI_TOKEN):
+    return {
+        "User-Agent": "ru.yandex.ytaxi/700.116.0.501961 (iPhone; iPhone13,2; iOS 18.6; Darwin)",
+        "Pragma": "no-cache",
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate, br",
+        "X-YaTaxi-UserId": "08a2d06810664758a42dee25bb0220ec",
+        "X-Ya-Go-Superapp-Session": "06F16257-7919-4052-BB9A-B96D22FE9B79",
+        "X-YaTaxi-Last-Zone-Names": "moscow,omsk",
+        "X-Yandex-Jws": "eyJhbGciOiJIUzI1NiIsImtpZCI6Im5hcndoYWwiLCJ0eXAiOiJKV1QifQ.eyJkZXZpY2VfaW50ZWdyaXR5Ijp0cnVlLCJleHBpcmVzX2F0X21zIjoxNzY0NjUzNzcyNDY4LCJpcCI6IjJhMDI6NmI4OmMzNzo4YmE5OjdhMDA6NGMxYjozM2Q3OjAiLCJ0aW1lc3RhbXBfbXMiOjE3NjQ2NTAxNzI0NjgsInV1aWQiOiIxMmRjY2EzZGUwYmU0NDhjOGVmZDRmMmFiNjhiZjAwNyJ9.H8Izcf7uXk80ZFVKRElhDyabqcBVKTMsa45oeXQmgIs",
+        "Authorization": f"Bearer {token}",
+        "Accept-Language": "ru;q=1, ru-RU;q=0.9",
+        "Content-Type": "application/json",
+        "X-VPN-Active": "1",
+        "Connection": "keep-alive",
+        "X-Mob-ID": "c76e6e2552f348b898891dd672fa5daa",
+    }
+
+
+def yandex_suggest_point(part: str, token: str = YANDEX_TAXI_TOKEN, point_type: str = "a"):
+    url = "https://tc.mobile.yandex.net/4.0/persuggest/v1/suggest?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_V4_0"
+    payload = {
+        "type": point_type,
+        "part": part,
+        "client_reqid": _random_reqid(),
+        "session_info": {},
+        "action": "user_input",
+        "state": {
+            "selected_class": "econom",
+            "coord_providers": [],
+            "fields": [],
+            "l10n": {
+                "countries": {"system": ["RU"]},
+                "languages": {"system": ["ru-RU"], "app": ["ru"]},
+                "mapkit_lang_region": "ru_RU",
+            },
+            "screen": "main.addresses",
+            "main_screen_version": "flex_main",
+        },
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=_yandex_headers(token), timeout=30)
+        resp.raise_for_status()
+        text = resp.text
+        match = re.search(r'"point"\s*:\s*\[\s*([0-9.\-]+)\s*,\s*([0-9.\-]+)\s*]', text)
+        if not match:
+            return None
+        return [float(match.group(1)), float(match.group(2))]
+    except Exception as e:
+        logger.error("Не удалось получить координаты по адресу %s: %s", part, e)
+        return None
+
+
+def yandex_route_price(point_a, point_b, tariff_class: str, token: str = YANDEX_TAXI_TOKEN):
+    url = "https://tc.mobile.yandex.net/3.0/routestats?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_0"
+    payload = {
+        "supports_verticals_selector": True,
+        "id": uuid.uuid4().hex,
+        "supported_markup": "tml-0.1",
+        "selected_class": tariff_class,
+        "supported_verticals": ["taxi"],
+        "route": [point_a, point_b],
+        "payment": {"type": "cash"},
+        "zone_name": "moscow",
+        "account_type": "lite",
+        "summary_version": 2,
+        "format_currency": True,
+        "supports_multiclass": True,
+        "supported_vertical_types": ["group"],
+        "requirements": {},
+        "multiclass_options": {"selected": False, "class": [], "verticals": []},
+        "class": [tariff_class],
+    }
+    try:
+        resp = requests.post(url, json=payload, headers=_yandex_headers(token), timeout=30)
+        resp.raise_for_status()
+        text = resp.text
+        pattern = rf'"pin_description"\s*:\s*"Отсюда[^"]*?([0-9]+)[^"]*"\s*,\s*"class"\s*:\s*"{re.escape(tariff_class)}"'
+        match = re.search(pattern, text)
+        if match:
+            return float(match.group(1))
+    except Exception as e:
+        logger.error("Не удалось получить стоимость маршрута: %s", e)
+    return None
+
+
+def calculate_route_price(address_from: str, address_to: str, tariff_class: str):
+    point_a = yandex_suggest_point(address_from, point_type="a")
+    point_b = yandex_suggest_point(address_to, point_type="b")
+    if not point_a or not point_b:
+        return None
+    return yandex_route_price(point_a, point_b, tariff_class)
+
 
 # ==========================
 # Инициализация БД
@@ -882,6 +1004,30 @@ async def notify_admins_invalid_bot(token: str, reason: str, owner_id: int | Non
             logger.error("Не удалось отправить уведомление админу %s: %s", admin_id, send_error)
 
 
+async def notify_admins_withdraw(bot_record: dict, user, requisites: str, available: float):
+    try:
+        admin_bot = Bot(token=PRIMARY_BOT_TOKEN)
+    except Exception as e:
+        logger.error("Не удалось создать бот для уведомления о выводе: %s", e)
+        return
+
+    username = f"@{user.username}" if user.username else "username не указан"
+    lines = [
+        "🧾 Запрос на вывод средств",
+        f"👤 Пользователь: {username}",
+        f"🆔 TGID: {user.id}",
+        f"🤖 Бот: {bot_record.get('title') or bot_record.get('token')}",
+        f"💰 Доступно: {available:.2f} ₽",
+        f"💳 Реквизиты: {requisites}",
+    ]
+    text = "\n".join(lines)
+    for admin_id in ADMIN_IDS:
+        try:
+            await admin_bot.send_message(admin_id, text)
+        except Exception as send_error:
+            logger.error("Не удалось отправить запрос на вывод админу %s: %s", admin_id, send_error)
+
+
 def create_bot_storage(token: str, owner_id: int, title: str | None = None):
     slug = safe_token_slug(token)
     bot_dir = DB_DIR / slug
@@ -1331,6 +1477,7 @@ def main_menu_keyboard(user_id=None):
     buttons = [
         [KeyboardButton(PROFILE_BTN)],
         [KeyboardButton(ORDER_BTN)],
+        [KeyboardButton(PRICE_BTN)],
         [KeyboardButton(HELP_BTN)],
     ]
     if user_id in ADMIN_IDS:
@@ -1357,6 +1504,16 @@ def start_links_keyboard():
 
 def faq_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("📚 FAQ", url=FAQ_URL)]])
+
+def price_tariff_keyboard():
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("econom"), KeyboardButton("business")],
+            [KeyboardButton("comfortplus"), KeyboardButton("vip")],
+            [KeyboardButton("premier"), KeyboardButton("maybach")],
+        ],
+        resize_keyboard=True,
+    )
 
 
 def taxi_force_reply_markup():
@@ -2045,7 +2202,11 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_ADMIN_BROADCAST,
     WAIT_PAYMENT_PROOF,
     WAIT_BOT_BALANCE,
-) = range(18)
+    WAIT_WITHDRAW_REQUISITES,
+    WAIT_PRICE_FROM,
+    WAIT_PRICE_TO,
+    WAIT_PRICE_TARIFF,
+) = range(22)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -2092,6 +2253,61 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=main_menu_keyboard(query.from_user.id),
         )
         return ConversationHandler.END
+
+# ---- Калькулятор цены ----
+PRICE_ADDRESS_HINT = (
+    "Пришлите адрес в формате:\n"
+    "Улица, дом, город/поселок/деревня\n"
+    "Например:\n"
+    "ул. Ленина, д. 20, г. Москва"
+)
+
+
+async def start_price_calculation(target, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["price_flow"] = {}
+    context.user_data["price_step"] = "from"
+    await target.reply_text(
+        f"Введите первый адрес.\n{PRICE_ADDRESS_HINT}",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+async def ask_second_price_address(target, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["price_step"] = "to"
+    await target.reply_text(
+        f"Теперь введите второй адрес.\n{PRICE_ADDRESS_HINT}",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+async def ask_price_tariff(target, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["price_step"] = "tariff"
+    await target.reply_text(
+        "Какой тариф нужен?\n"
+        "эконом - econom\n"
+        "комфорт - business\n"
+        "Комфорт+ - comfortplus\n"
+        "бизнес - vip\n"
+        "Премьер - premier\n"
+        "Элит - maybach",
+        reply_markup=price_tariff_keyboard(),
+    )
+
+
+async def show_price_result(target, base_price: float, tariff_class: str):
+    if base_price is None:
+        await target.reply_text(
+            "Не удалось получить стоимость. Попробуйте ещё раз позже или уточните адреса.",
+            reply_markup=main_menu_keyboard(target.from_user.id if hasattr(target, "from_user") else None),
+        )
+        return
+    discounted = round(base_price * 0.55, 2)
+    await target.reply_text(
+        f"Стоимость поездки ({tariff_class}):\n"
+        f"<s>{base_price:.2f} ₽</s> <b>{discounted:.2f} ₽</b> — оплата нам с учётом скидки",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
+    )
 
 # ---- Клавиатура "Пропустить" ----
 def skip_keyboard():
@@ -3460,9 +3676,33 @@ async def admin_bot_balance_update(update: Update, context: ContextTypes.DEFAULT
     return ConversationHandler.END
 
 
-@admin_only
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from datetime import timedelta
+    bot_record = get_bot_by_token(context.bot.token)
+    user_id = update.effective_user.id
+    if (
+        bot_record
+        and bot_record.get("owner_id")
+        and bot_record.get("token") != PRIMARY_BOT_TOKEN
+    ):
+        owner_id = bot_record.get("owner_id")
+        if owner_id != user_id:
+            return
+        total_earned = calc_owner_earnings(bot_record.get("token"))
+        available = float(bot_record.get("pending_reward") or 0)
+        text = (
+            "📊 Статистика вашего бота\n"
+            f"Сумма заработанная за всё время: {total_earned:.2f} ₽\n"
+            f"Доступно для вывода: {available:.2f} ₽"
+        )
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Запросить вывод", callback_data=f"owner_withdraw_{bot_record.get('id')}")]]
+        )
+        await update.message.reply_text(text, reply_markup=keyboard)
+        return
+
+    if user_id not in ADMIN_IDS:
+        return
     now = datetime.now()
     day_ago = now - timedelta(days=1)
     day_ago_str = day_ago.strftime("%Y-%m-%d %H:%M:%S")
@@ -3491,6 +3731,22 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎁 Заработок за всё время: {total_sum:.2f} ₽"
     )
     await update.message.reply_text(text, parse_mode="HTML")
+
+
+async def owner_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    try:
+        bot_id = int(query.data.rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        return ConversationHandler.END
+    bot_record = get_bot_by_id(bot_id)
+    if not bot_record or bot_record.get("owner_id") != query.from_user.id:
+        await query.message.reply_text("Запрос недоступен.")
+        return ConversationHandler.END
+    context.user_data["awaiting_withdraw_bot"] = bot_id
+    await query.message.reply_text("Введите реквизиты для вывода средств:")
+    return WAIT_WITHDRAW_REQUISITES
 
 @admin_only
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3584,6 +3840,7 @@ def configure_application(app):
     app.add_handler(conv_handler)
     app.add_handler(admin_conv_handler)
     app.add_handler(payment_conv)
+    app.add_handler(CallbackQueryHandler(owner_withdraw_callback, pattern="^owner_withdraw_"))
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
@@ -3591,6 +3848,54 @@ def configure_application(app):
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         user_id = update.effective_user.id
+
+        if context.user_data.get("awaiting_withdraw_bot"):
+            bot_id = context.user_data.pop("awaiting_withdraw_bot", None)
+            requisites = text.strip()
+            bot_record = get_bot_by_id(bot_id) if bot_id else None
+            if bot_record and bot_record.get("owner_id") == user_id:
+                available = float(bot_record.get("pending_reward") or 0)
+                await notify_admins_withdraw(bot_record, update.effective_user, requisites, available)
+                await update.message.reply_text(
+                    "Запрос на вывод отправлен администраторам.",
+                    reply_markup=main_menu_keyboard(user_id),
+                )
+            else:
+                await update.message.reply_text("Бот не найден или доступ запрещён.")
+            return
+
+        price_step = context.user_data.get("price_step")
+        if price_step:
+            price_flow = context.user_data.setdefault("price_flow", {})
+            if price_step == "from":
+                price_flow["from"] = text.strip()
+                await ask_second_price_address(update.message, context)
+                return
+            if price_step == "to":
+                price_flow["to"] = text.strip()
+                await ask_price_tariff(update.message, context)
+                return
+            if price_step == "tariff":
+                raw = text.strip().lower()
+                tariff_class = TARIFF_CODE_MAP.get(raw) or TARIFF_RU_MAP.get(raw) or raw
+                if tariff_class not in TARIFF_CODE_MAP.values():
+                    await update.message.reply_text(
+                        "Не понял тариф. Укажите один из: econom, business, comfortplus, vip, premier, maybach.",
+                        reply_markup=price_tariff_keyboard(),
+                    )
+                    return
+                address_from = price_flow.get("from")
+                address_to = price_flow.get("to")
+                context.user_data.pop("price_step", None)
+                context.user_data.pop("price_flow", None)
+                await update.message.reply_text("Считаю стоимость...", reply_markup=ReplyKeyboardRemove())
+                price = calculate_route_price(address_from, address_to, tariff_class)
+                await show_price_result(update.message, price, tariff_class)
+                await update.message.reply_text(
+                    "Возврат в главное меню",
+                    reply_markup=main_menu_keyboard(update.effective_user.id),
+                )
+                return
 
         if context.user_data.get("awaiting_city"):
             city = text.strip()
@@ -3654,6 +3959,8 @@ def configure_application(app):
             await help_menu(update, context)
         elif text == ORDER_BTN:
             await order_menu(update, context)
+        elif text == PRICE_BTN:
+            await start_price_calculation(update.message, context)
         elif text == FAQ_BTN:
             await update.message.reply_text(
                 "Откройте ответы на частые вопросы:", reply_markup=faq_keyboard()
