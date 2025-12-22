@@ -3606,9 +3606,6 @@ RUNNING_BOTS: dict[str, asyncio.Task] = {}
 
 
 def configure_application(app):
-    app.add_handler(MessageHandler(filters.ALL, sync_user_db, block=False), group=0)
-    app.add_handler(CallbackQueryHandler(sync_user_db, pattern=".*", block=False), group=0)
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("ban", ban_user))
@@ -3684,6 +3681,7 @@ def configure_application(app):
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
 
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await sync_user_db(update, context)
         text = update.message.text
         user_id = update.effective_user.id
 
