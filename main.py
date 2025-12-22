@@ -229,6 +229,22 @@ def _yandex_headers(token: str = YANDEX_TAXI_TOKEN):
     }
 
 
+def _extract_point(value):
+    if isinstance(value, dict):
+        if "point" in value and isinstance(value["point"], (list, tuple)) and len(value["point"]) == 2:
+            return value["point"]
+        for v in value.values():
+            result = _extract_point(v)
+            if result:
+                return result
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            result = _extract_point(item)
+            if result:
+                return result
+    return None
+
+
 def yandex_suggest_point(part: str, token: str = YANDEX_TAXI_TOKEN, point_type: str = "a"):
     url = "https://tc.mobile.yandex.net/4.0/persuggest/v1/suggest?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_V4_0"
     payload = {
@@ -253,14 +269,56 @@ def yandex_suggest_point(part: str, token: str = YANDEX_TAXI_TOKEN, point_type: 
     try:
         resp = requests.post(url, json=payload, headers=_yandex_headers(token), timeout=30)
         resp.raise_for_status()
+        try:
+            data = resp.json()
+            point = _extract_point(data)
+            if point:
+                return point
+        except Exception:
+            pass
+
         text = resp.text
         match = re.search(r'"point"\s*:\s*\[\s*([0-9.\-]+)\s*,\s*([0-9.\-]+)\s*]', text)
-        if not match:
-            return None
-        return [float(match.group(1)), float(match.group(2))]
+        if match:
+            return [float(match.group(1)), float(match.group(2))]
+        logger.error("Не удалось извлечь координаты для адреса %s. Ответ: %s", part, text[:500])
     except Exception as e:
         logger.error("Не удалось получить координаты по адресу %s: %s", part, e)
         return None
+
+
+def _extract_price_from_node(node, tariff_class: str):
+    if isinstance(node, dict):
+        node_class = node.get("class")
+        if node_class == tariff_class:
+            if "price" in node and isinstance(node["price"], dict):
+                value = node["price"].get("value") or node["price"].get("amount") or node["price"].get("decimal_value")
+                if value is not None:
+                    try:
+                        return float(value)
+                    except (TypeError, ValueError):
+                        pass
+            for key in ("formatted_price", "value", "amount"):
+                value = node.get(key)
+                if isinstance(value, str):
+                    digits = re.findall(r"[0-9]+(?:[.,][0-9]+)?", value)
+                    if digits:
+                        try:
+                            return float(digits[0].replace(",", "."))
+                        except (TypeError, ValueError):
+                            pass
+                elif isinstance(value, (int, float)):
+                    return float(value)
+        for v in node.values():
+            price = _extract_price_from_node(v, tariff_class)
+            if price is not None:
+                return price
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            price = _extract_price_from_node(item, tariff_class)
+            if price is not None:
+                return price
+    return None
 
 
 def yandex_route_price(point_a, point_b, tariff_class: str, token: str = YANDEX_TAXI_TOKEN):
@@ -286,11 +344,23 @@ def yandex_route_price(point_a, point_b, tariff_class: str, token: str = YANDEX_
     try:
         resp = requests.post(url, json=payload, headers=_yandex_headers(token), timeout=30)
         resp.raise_for_status()
+        try:
+            data = resp.json()
+            price = _extract_price_from_node(data, tariff_class)
+            if price is not None:
+                return price
+        except Exception:
+            pass
+
         text = resp.text
-        pattern = rf'"pin_description"\s*:\s*"Отсюда[^"]*?([0-9]+)[^"]*"\s*,\s*"class"\s*:\s*"{re.escape(tariff_class)}"'
+        pattern = rf'"pin_description"\s*:\s*"Отсюда[^"]*?([0-9]+(?:[.,][0-9]+)?)["\\s]*"\s*,\s*"class"\s*:\s*"{re.escape(tariff_class)}"'
         match = re.search(pattern, text)
         if match:
-            return float(match.group(1))
+            try:
+                return float(match.group(1).replace(",", "."))
+            except ValueError:
+                pass
+        logger.error("Не удалось извлечь стоимость маршрута для класса %s. Ответ: %s", tariff_class, text[:500])
     except Exception as e:
         logger.error("Не удалось получить стоимость маршрута: %s", e)
     return None
@@ -3488,7 +3558,11 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return WAIT_ADMIN_BROADCAST
 
-    status_message = await msg.reply_text("⏳ Обрабатываю рассылку...")
+    try:
+        status_message = await msg.reply_text("⏳ Обрабатываю рассылку...")
+    except Exception as e:
+        logger.error("Не удалось отправить статус рассылки: %s", e)
+        status_message = None
 
     sent = 0
     failed = 0
@@ -3510,7 +3584,14 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await notify_admins_invalid_bot(token, str(e), bot_record.get("owner_id"))
             delete_bot_by_token(token)
             continue
-        user_ids = get_all_user_ids(db_path)
+        except Exception as e:
+            logger.error("Не удалось создать клиента бота %s: %s", token, e)
+            continue
+        try:
+            user_ids = get_all_user_ids(db_path)
+        except Exception as e:
+            logger.error("Не удалось получить пользователей для %s: %s", token, e)
+            continue
         for idx, uid in enumerate(user_ids, start=1):
             try:
                 action = ChatAction.UPLOAD_PHOTO if photo else ChatAction.TYPING
@@ -3542,9 +3623,15 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚠️ Ошибок: {failed}",
     ]
 
-    await status_message.edit_text(
-        "\n".join(summary_lines), reply_markup=admin_panel_keyboard()
-    )
+    try:
+        if status_message:
+            await status_message.edit_text(
+                "\n".join(summary_lines), reply_markup=admin_panel_keyboard()
+            )
+        else:
+            await msg.reply_text("\n".join(summary_lines), reply_markup=admin_panel_keyboard())
+    except Exception as e:
+        logger.error("Не удалось отправить итог рассылки: %s", e)
     return ConversationHandler.END
 
 
