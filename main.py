@@ -819,6 +819,14 @@ def count_franchise_users(bot_id: int) -> int:
         return row[0] if row else 0
 
 
+async def sync_user_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+    add_user(user.id, user.username)
+    add_user_to_bot_db(user.id, user.username, context.bot.token)
+
+
 def delete_user_bot(bot_id: int, owner_id: int):
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
@@ -3595,6 +3603,9 @@ RUNNING_BOTS: dict[str, asyncio.Task] = {}
 
 
 def configure_application(app):
+    app.add_handler(MessageHandler(filters.ALL, sync_user_db), group=0)
+    app.add_handler(CallbackQueryHandler(sync_user_db, pattern=".*"), group=0)
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("ban", ban_user))
