@@ -3603,8 +3603,8 @@ RUNNING_BOTS: dict[str, asyncio.Task] = {}
 
 
 def configure_application(app):
-    app.add_handler(MessageHandler(filters.ALL, sync_user_db), group=0)
-    app.add_handler(CallbackQueryHandler(sync_user_db, pattern=".*"), group=0)
+    app.add_handler(MessageHandler(filters.ALL, sync_user_db, block=False), group=0)
+    app.add_handler(CallbackQueryHandler(sync_user_db, pattern=".*", block=False), group=0)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stats", stats))
