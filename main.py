@@ -2175,10 +2175,7 @@ async def price_tariff_selected(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return ConversationHandler.END
 
-    try:
-        price_value = float(str(price).replace(",", "."))
-    except ValueError:
-        price_value = None
+    price_value = _parse_price_value(price)
 
     if price_value is None:
         await query.message.reply_text(
@@ -2411,6 +2408,14 @@ def _extract_price_from_json(payload, preferred_class: str | None = None) -> tup
                     match = re.search(r"([0-9]+)", formatted)
                     if match:
                         candidates.append((match.group(1), class_name))
+            if "formatted_prices" in value and isinstance(value.get("formatted_prices"), list):
+                for item in value.get("formatted_prices"):
+                    if not isinstance(item, dict):
+                        continue
+                    class_name = item.get("class")
+                    formatted = item.get("formatted_price")
+                    if isinstance(formatted, str):
+                        candidates.append((formatted, class_name))
             for item in value.values():
                 _walk(item)
         elif isinstance(value, list):
@@ -2427,6 +2432,23 @@ def _extract_price_from_json(payload, preferred_class: str | None = None) -> tup
     if candidates:
         return candidates[0][0], candidates[0][1]
     return None, None
+
+
+def _parse_price_value(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        matches = re.findall(r"[0-9]+(?:[\\.,][0-9]+)?", value)
+        if not matches:
+            return None
+        normalized = matches[0].replace(",", ".")
+        try:
+            return float(normalized)
+        except ValueError:
+            return None
+    return None
 
 
 def fetch_yandex_price(part_a: str, part_b: str, price_class: str | None = None) -> tuple[str | None, str | None]:
