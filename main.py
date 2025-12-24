@@ -2180,11 +2180,37 @@ def order_confirmation_keyboard():
     ])
 
 
-def _extract_point(source: str, key: str) -> list[float] | None:
-    match = re.search(rf'"{key}"\s*:\s*\[\\s*([0-9.\\-]+)\\s*,\\s*([0-9.\\-]+)\\s*\\]', source)
-    if not match:
-        return None
-    return [float(match.group(1)), float(match.group(2))]
+def _normalize_point(value) -> list[float] | None:
+    if isinstance(value, list) and len(value) == 2 and all(isinstance(v, (int, float)) for v in value):
+        return [float(value[0]), float(value[1])]
+    if (
+        isinstance(value, list)
+        and value
+        and isinstance(value[0], list)
+        and len(value[0]) == 2
+        and all(isinstance(v, (int, float)) for v in value[0])
+    ):
+        return [float(value[0][0]), float(value[0][1])]
+    return None
+
+
+def _find_point_in_json(payload, keys: tuple[str, ...]) -> list[float] | None:
+    if isinstance(payload, dict):
+        for key in keys:
+            if key in payload:
+                normalized = _normalize_point(payload.get(key))
+                if normalized:
+                    return normalized
+        for value in payload.values():
+            found = _find_point_in_json(value, keys)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _find_point_in_json(item, keys)
+            if found:
+                return found
+    return None
 
 
 def _extract_price(source: str, price_class: str) -> str | None:
@@ -2309,7 +2335,7 @@ def fetch_yandex_price(part_a: str, part_b: str) -> tuple[str | None, str | None
         timeout=20,
     )
     response_a.raise_for_status()
-    point_a = _extract_point(response_a.text, "point")
+    point_a = _find_point_in_json(response_a.json(), ("point", "position"))
     if not point_a:
         return None, None
 
@@ -2320,7 +2346,7 @@ def fetch_yandex_price(part_a: str, part_b: str) -> tuple[str | None, str | None
         timeout=20,
     )
     response_b.raise_for_status()
-    point_b = _extract_point(response_b.text, "position")
+    point_b = _find_point_in_json(response_b.json(), ("position", "point"))
     if not point_b:
         return None, None
 
