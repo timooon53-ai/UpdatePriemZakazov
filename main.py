@@ -7,6 +7,8 @@ import logging
 import requests
 import random
 import time
+import json
+import re
 import warnings
 import shutil
 from datetime import datetime
@@ -178,9 +180,17 @@ CHAT_URL = (os.getenv("CHAT_URL") or DEFAULT_CHAT_URL).strip()
 PROFILE_BTN = "Профиль ✨"
 ORDER_BTN = "Заказать такси 🎄🛷"
 HELP_BTN = "Помощь ❄️"
+PRICE_BTN = "Проверить цену 💸"
 ADMIN_BTN = "Админка 🎅"
 BACK_BTN = "Назад ⛄️"
 FAQ_BTN = "FAQ 📚"
+
+YANDEX_TAXI_TOKEN = (
+    os.getenv("YANDEX_TAXI_TOKEN")
+    or locals().get("YANDEX_TAXI_TOKEN")
+    or "y0_AgAAAAB1g7gdAAU0HAAAAAECOUIwAAAYjdKIuM9IEZ2DXVd1oG4LOWpPrg"
+)
+YANDEX_PRICE_CLASS = "comfortplus"
 
 # ==========================
 # Инициализация БД
@@ -1331,6 +1341,7 @@ def main_menu_keyboard(user_id=None):
     buttons = [
         [KeyboardButton(PROFILE_BTN)],
         [KeyboardButton(ORDER_BTN)],
+        [KeyboardButton(PRICE_BTN)],
         [KeyboardButton(HELP_BTN)],
     ]
     if user_id in ADMIN_IDS:
@@ -2037,6 +2048,8 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_ADDITIONAL,
     WAIT_CHILD_SEAT_TYPE,
     WAIT_COMMENT,
+    WAIT_PRICE_FROM,
+    WAIT_PRICE_TO,
     WAIT_ORDER_CONFIRM,
     WAIT_REPLACEMENT_FIELD,
     WAIT_ADMIN_MESSAGE,
@@ -2045,7 +2058,7 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_ADMIN_BROADCAST,
     WAIT_PAYMENT_PROOF,
     WAIT_BOT_BALANCE,
-) = range(18)
+) = range(20)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -2058,6 +2071,68 @@ async def order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     await update.message.reply_text("Выберите способ заказа:", reply_markup=order_type_keyboard())
+
+
+async def price_check_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["price_check"] = {}
+    await update.message.reply_text(
+        "🧭 Введите адрес отправления для расчёта цены (Такси от Майка)",
+        reply_markup=taxi_force_reply_markup(),
+    )
+    return WAIT_PRICE_FROM
+
+
+async def price_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.setdefault("price_check", {})["address_from"] = update.message.text
+    await update.message.reply_text(
+        "📍 Введите адрес назначения для расчёта цены (Такси от Майка)",
+        reply_markup=taxi_force_reply_markup(),
+    )
+    return WAIT_PRICE_TO
+
+
+async def price_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = context.user_data.setdefault("price_check", {})
+    data["address_to"] = update.message.text
+
+    address_from = data.get("address_from")
+    address_to = data.get("address_to")
+    if not address_from or not address_to:
+        await update.message.reply_text(
+            "Не удалось прочитать адреса. Попробуйте снова.",
+            reply_markup=main_menu_keyboard(update.effective_user.id),
+        )
+        return ConversationHandler.END
+
+    await update.message.reply_text("⏳ Проверяю цену, подождите...")
+    try:
+        price, price_class = fetch_yandex_price(address_from, address_to)
+    except Exception as exc:
+        logger.warning("Ошибка расчёта цены: %s", exc)
+        await update.message.reply_text(
+            "Не удалось получить цену. Попробуйте позже.",
+            reply_markup=main_menu_keyboard(update.effective_user.id),
+        )
+        return ConversationHandler.END
+
+    if not price:
+        await update.message.reply_text(
+            "Цена не найдена по указанным адресам. Попробуйте уточнить адреса.",
+            reply_markup=main_menu_keyboard(update.effective_user.id),
+        )
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        (
+            "💸 Стоимость поездки рассчитана:\n"
+            f"Откуда: {address_from}\n"
+            f"Куда: {address_to}\n"
+            f"Тариф: {price_class}\n"
+            f"Цена: {price} ₽"
+        ),
+        reply_markup=main_menu_keyboard(update.effective_user.id),
+    )
+    return ConversationHandler.END
 async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2103,6 +2178,305 @@ def order_confirmation_keyboard():
         [InlineKeyboardButton("Отправить", callback_data="order_confirm_send")],
         [InlineKeyboardButton("Отменить", callback_data="order_confirm_cancel")],
     ])
+
+
+def _extract_point(source: str, key: str) -> list[float] | None:
+    match = re.search(rf'"{key}"\s*:\s*\[\\s*([0-9.\\-]+)\\s*,\\s*([0-9.\\-]+)\\s*\\]', source)
+    if not match:
+        return None
+    return [float(match.group(1)), float(match.group(2))]
+
+
+def _extract_price(source: str, price_class: str) -> str | None:
+    pattern = (
+        r'"pin_description"\\s*:\\s*"Отсюда[\\s\\u00A0\\u202F]*([0-9]+)[^"]*"'
+        rf'\\s*,\\s*"class"\\s*:\\s*"{re.escape(price_class)}"'
+    )
+    match = re.search(pattern, source)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def fetch_yandex_price(part_a: str, part_b: str) -> tuple[str | None, str | None]:
+    token = YANDEX_TAXI_TOKEN
+    suggest_url = (
+        "https://tc.mobile.yandex.net/4.0/persuggest/v1/suggest"
+        "?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_V4_0"
+    )
+    suggest_headers = {
+        "User-Agent": "ru.yandex.ytaxi/700.116.0.501961 (iPhone; iPhone13,2; iOS 18.6; Darwin)",
+        "Pragma": "no-cache",
+        "Accept": "*/*",
+        "Accept-Encoding": "gzip, deflate, br",
+        "X-YaTaxi-UserId": "08a2d06810664758a42dee25bb0220ec",
+        "X-Ya-Go-Superapp-Session": "06F16257-7919-4052-BB9A-B96D22FE9B79",
+        "X-YaTaxi-Last-Zone-Names": "novosibirsk,moscow,omsk",
+        "X-Yandex-Jws": (
+            "eyJhbGciOiJIUzI1NiIsImtpZCI6Im5hcndoYWwiLCJ0eXAiOiJKV1QifQ."
+            "eyJkZXZpY2VfaW50ZWdyaXR5Ijp0cnVlLCJleHBpcmVzX2F0X21zIjoxNzY0NjUzNzcyNDY4LCJpcCI6"
+            "IjJhMDI6NmI4OmMzNzo4YmE5OjdhMDA6NGMxYjozM2Q3OjAiLCJ0aW1lc3RhbXBfbXMiOjE3NjQ2NTAxNzI0Njgs"
+            "InV1aWQiOiIxMmRjY2EzZGUwYmU0NDhjOGVmZDRmMmFiNjhiZjAwNyJ9.H8Izcf7uXk80ZFVKRElhDyabqcBVKTMsa45oeXQmgIs"
+        ),
+        "X-Perf-Class": "medium",
+        "Connection": "keep-alive",
+        "Authorization": f"Bearer {token}",
+        "Accept-Language": "ru;q=1, ru-RU;q=0.9",
+        "X-Yataxi-Ongoing-Orders-Statuses": "none",
+        "Content-Type": "application/json",
+        "X-VPN-Active": "1",
+        "X-Mob-ID": "c76e6e2552f348b898891dd672fa5daa",
+        "X-YaTaxi-Has-Ongoing-Orders": "false",
+    }
+    suggest_payload_a = {
+        "type": "a",
+        "part": part_a,
+        "client_reqid": "1764650675979_ebb57515c4883b271c4dce99ace5f11b",
+        "session_info": {},
+        "action": "user_input",
+        "state": {
+            "bbox": [73.44446455010228, 54.9072988605965, 73.44655181916946, 54.904995264809976],
+            "location_available": False,
+            "coord_providers": [],
+            "precise_location_available": False,
+            "wifi_networks": [],
+            "fields": [
+                {
+                    "position": [73.44550818463587, 54.90664973530346],
+                    "metrica_method": "pin_drop",
+                    "finalsuggest_method": "fs_not_sticky",
+                    "log": (
+                        "{\"uri\":\"ymapsbm1://geo?data=Cgg1NzExODE5NhJv0KDQvtGB0YHQuNGPLCDQntC80YHQuiwg0LzQuNC60YDQvtGA0LDQudC-0L0g0JzQvtGB0LrQvtCy0LrQsC0yLCDRg9C70LjRhtCwINCv0YDQvtGB0LvQsNCy0LAg0JPQsNGI0LXQutCwLCAxMy8xIgoN_OOSQhVDoFtC\","
+                        "\"trace_id\":\"dcf2c5d465ce4b918a3641547ceed8cb\"}"
+                    ),
+                    "metrica_action": "manual",
+                    "type": "a",
+                }
+            ],
+            "selected_class": "econom",
+            "l10n": {
+                "countries": {"system": ["RU"]},
+                "languages": {"system": ["ru-RU"], "app": ["ru"]},
+                "mapkit_lang_region": "ru_RU",
+            },
+            "app_metrica": {"uuid": "12dcca3de0be448c8efd4f2ab68bf007", "device_id": "818182718hffy"},
+            "main_screen_version": "flex_main",
+            "screen": "main.addresses",
+        },
+        "suggest_serpid": "8aa2d1a77c60db11e2fa8cac6016ac2a",
+    }
+    suggest_payload_b = {
+        "action": "user_input",
+        "suggest_serpid": "1fffc1028b7f9f7bfc80b0ac30417df1",
+        "client_reqid": "1764651135479_cd7cb200336a407eba8b5cd895cbe44c",
+        "part": part_b,
+        "session_info": {},
+        "state": {
+            "selected_class": "econom",
+            "coord_providers": [],
+            "fields": [
+                {
+                    "entrance": "4",
+                    "metrica_method": "suggest",
+                    "position": [37.63283473672819, 55.81002045183566],
+                    "log": (
+                        "{\"suggest_reqid\":\"1764650676398765-287523944-suggest-maps-yp-22\",\"user_params\":{\"request\":\"Бочкова 5\",\"ll\":\"73.445511,54.906147\",\"spn\":\"0.00208282,0.00230408\",\"ull\":\"73.445511,54.906147\",\"lang\":\"ru\"},\"client_reqid\":\"1764650675979_ebb57515c4883b271c4dce99ace5f11b\",\"server_reqid\":\"1764650676398765-287523944-suggest-maps-yp-22\",\"pos\":0,\"type\":\"toponym\",\"where\":{\"name\":\"Россия, Москва, улица Бочкова, 5\",\"source_id\":\"56760816\",\"mutable_source_id\":\"56760816\",\"title\":\"улица Бочкова, 5\"},\"uri\":\"ymapsbm1://geo?data=Cgg1Njc2MDgxNhI40KDQvtGB0YHQuNGPLCDQnNC-0YHQutCy0LAsINGD0LvQuNGG0LAg0JHQvtGH0LrQvtCy0LAsIDUiCg3whxZCFYY9X0I,\",\"method\":\"suggest.geosuggest\",\"trace_id\":\"cb7de160c386df3ca6958bfd5850e8eb\"}"
+                    ),
+                    "type": "a",
+                    "finalsuggest_method": "np_entrances",
+                }
+            ],
+            "l10n": {
+                "countries": {"system": ["RU"]},
+                "languages": {"app": ["ru"], "system": ["ru-RU"]},
+                "mapkit_lang_region": "ru_RU",
+            },
+            "bbox": [37.63176701134504, 55.81066951258319, 37.63390246211134, 55.80836614425004],
+            "screen": "main.addresses",
+            "main_screen_version": "flex_main",
+            "location_available": False,
+            "app_metrica": {"device_id": "818182718hffy", "uuid": "12dcca3de0be448c8efd4f2ab68bf007"},
+            "precise_location_available": False,
+            "wifi_networks": [],
+        },
+        "type": "b",
+    }
+
+    response_a = requests.post(
+        suggest_url,
+        data=json.dumps(suggest_payload_a),
+        headers=suggest_headers,
+        timeout=20,
+    )
+    response_a.raise_for_status()
+    point_a = _extract_point(response_a.text, "point")
+    if not point_a:
+        return None, None
+
+    response_b = requests.post(
+        suggest_url,
+        data=json.dumps(suggest_payload_b),
+        headers=suggest_headers,
+        timeout=20,
+    )
+    response_b.raise_for_status()
+    point_b = _extract_point(response_b.text, "position")
+    if not point_b:
+        return None, None
+
+    route_stats_url = (
+        "https://tc.mobile.yandex.net/3.0/routestats"
+        "?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_0"
+    )
+    route_stats_headers = {
+        "X-YaTaxi-UserId": "08a2d06810664758a42dee25bb0220ec",
+        "User-Agent": "ru.yandex.ytaxi/700.116.0.501961 (iPhone; iPhone13,2; iOS 18.6; Darwin)",
+        "X-YaTaxi-Has-Ongoing-Orders": "false",
+        "X-Ya-Go-Superapp-Session": "06F16257-7919-4052-BB9A-B96D22FE9B79",
+        "X-YaTaxi-Last-Zone-Names": "novosibirsk,omsk,moscow",
+        "X-Yandex-Jws": (
+            "eyJhbGciOiJIUzI1NiIsImtpZCI6Im5hcndoYWwiLCJ0eXAiOiJKV1QifQ."
+            "eyJkZXZpY2VfaW50ZWdyaXR5Ijp0cnVlLCJleHBpcmVzX2F0X21zIjoxNzY0NjUzNzcyNDY4LCJpcCI6"
+            "IjJhMDI6NmI4OmMzNzo4YmE5OjdhMDA6NGMxYjozM2Q3OjAiLCJ0aW1lc3RhbXBfbXMiOjE3NjQ2NTAxNzI0Njgs"
+            "InV1aWQiOiIxMmRjY2EzZGUwYmU0NDhjOGVmZDRmMmFiNjhiZjAwNyJ9.H8Izcf7uXk80ZFVKRElhDyabqcBVKTMsa45oeXQmgIs"
+        ),
+        "X-Perf-Class": "medium",
+        "Connection": "keep-alive",
+        "Authorization": f"Bearer {token}",
+        "Accept-Language": "ru;q=1, ru-RU;q=0.9",
+        "Accept": "*/*",
+        "X-Yataxi-Ongoing-Orders-Statuses": "none",
+        "Content-Type": "application/json",
+        "X-VPN-Active": "1",
+        "Accept-Encoding": "gzip, deflate, br",
+        "X-Mob-ID": "c76e6e2552f348b898891dd672fa5daa",
+    }
+    route_payload = {
+        "supports_verticals_selector": True,
+        "id": "08a2d06810664758a42dee25bb0220ec",
+        "supported_markup": "tml-0.1",
+        "selected_class": "econom",
+        "supported_verticals": [
+            "drive",
+            "transport",
+            "hub",
+            "intercity",
+            "maas",
+            "taxi",
+            "ultima",
+            "child",
+            "delivery",
+            "rest_tariffs",
+        ],
+        "supports_no_cars_available": True,
+        "supports_unavailable_alternatives": True,
+        "suggest_alternatives": True,
+        "skip_estimated_waiting": False,
+        "supports_paid_options": True,
+        "supports_explicit_antisurge": True,
+        "parks": [],
+        "is_lightweight": False,
+        "tariff_requirements": [
+            {"class": "econom", "requirements": {}},
+            {"class": "lite_b2b", "requirements": {}},
+            {"class": "business", "requirements": {}},
+            {"class": "standart_b2b", "requirements": {}},
+            {"class": "comfortplus", "requirements": {}},
+            {"class": "optimum_b2b", "requirements": {}},
+            {"class": "vip", "requirements": {}},
+            {"class": "ultimate", "requirements": {}},
+            {"class": "maybach", "requirements": {}},
+            {"class": "child_tariff", "requirements": {}},
+            {"class": "minivan", "requirements": {}},
+            {"class": "premium_van", "requirements": {}},
+            {"class": "personal_driver", "requirements": {}},
+            {"class": "express", "requirements": {}},
+            {"class": "courier", "requirements": {}},
+            {"class": "cargo", "requirements": {}},
+            {"class": "selfdriving", "requirements": {}},
+        ],
+        "enable_fallback_for_tariffs": True,
+        "supported": [
+            {"type": "formatted_prices"},
+            {"type": "multiclass_requirements"},
+            {"type": "multiclasses"},
+            {
+                "type": "verticals_multiclass",
+                "payload": {
+                    "classes": [
+                        "courier",
+                        "cargo",
+                        "ndd",
+                        "express_d2d",
+                        "express_outdoor",
+                        "express_d2d_slow",
+                        "sdd_short",
+                        "sdd_evening",
+                        "sdd_long",
+                        "express_fast",
+                    ]
+                },
+            },
+            {"type": "plus_promo_alternative"},
+            {
+                "type": "order_flow_delivery",
+                "payload": {
+                    "classes": [
+                        "courier",
+                        "cargo",
+                        "ndd",
+                        "express_d2d",
+                        "express_outdoor",
+                        "express_d2d_slow",
+                        "sdd_short",
+                        "sdd_evening",
+                        "sdd_long",
+                        "express_fast",
+                    ]
+                },
+            },
+            {"type": "requirements_v2"},
+        ],
+        "with_title": True,
+        "supports_multiclass": True,
+        "supported_vertical_types": ["group"],
+        "supported_features": [
+            {"type": "order_button_actions", "values": ["open_tariff_card", "deeplink"]},
+            {"type": "swap_summary", "values": ["high_tariff_selector"]},
+        ],
+        "delivery_extra": {
+            "door_to_door": False,
+            "is_delivery_business_account_enabled": False,
+            "insurance": {"selected": False},
+            "pay_on_delivery": False,
+        },
+        "route": [point_a, point_b],
+        "payment": {"type": "cash"},
+        "zone_name": "moscow",
+        "account_type": "lite",
+        "summary_version": 2,
+        "format_currency": True,
+        "supports_hideable_tariffs": True,
+        "force_soon_order": False,
+        "use_toll_roads": False,
+        "estimate_waiting_selected_only": False,
+        "selected_class_only": False,
+        "position_accuracy": 0,
+        "size_hint": 300,
+        "extended_description": True,
+        "requirements": {},
+        "multiclass_options": {"selected": False, "class": [], "verticals": []},
+    }
+
+    route_response = requests.post(
+        route_stats_url,
+        data=json.dumps(route_payload),
+        headers=route_stats_headers,
+        timeout=25,
+    )
+    route_response.raise_for_status()
+    price = _extract_price(route_response.text, YANDEX_PRICE_CLASS)
+    return price, YANDEX_PRICE_CLASS
 
 
 def build_order_preview_text(order_data, order_type):
@@ -3548,6 +3922,17 @@ def configure_application(app):
         per_message=False,
     )
 
+    price_conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(f"^{re.escape(PRICE_BTN)}$"), price_check_start)],
+        states={
+            WAIT_PRICE_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_address_from)],
+            WAIT_PRICE_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_address_to)],
+        },
+        fallbacks=[CommandHandler("start", start_over)],
+        per_user=True,
+        per_message=False,
+    )
+
     admin_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
         states={
@@ -3582,6 +3967,7 @@ def configure_application(app):
     )
 
     app.add_handler(conv_handler)
+    app.add_handler(price_conv_handler)
     app.add_handler(admin_conv_handler)
     app.add_handler(payment_conv)
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
@@ -3654,6 +4040,8 @@ def configure_application(app):
             await help_menu(update, context)
         elif text == ORDER_BTN:
             await order_menu(update, context)
+        elif text == PRICE_BTN:
+            return
         elif text == FAQ_BTN:
             await update.message.reply_text(
                 "Откройте ответы на частые вопросы:", reply_markup=faq_keyboard()
