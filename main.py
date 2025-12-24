@@ -191,6 +191,15 @@ YANDEX_TAXI_TOKEN = (
     or "y0_AgAAAAB1g7gdAAU0HAAAAAECOUIwAAAYjdKIuM9IEZ2DXVd1oG4LOWpPrg"
 )
 YANDEX_PRICE_CLASS = "comfortplus"
+PRICE_TARIFFS = [
+    ("econom", "🚕 Эконом"),
+    ("business", "🚘 Комфорт"),
+    ("comfortplus", "🚗 Комфорт+"),
+    ("minivan", "🚐 Минивэн"),
+    ("vip", "💼 Бизнес"),
+    ("ultimate", "✨ Премьер"),
+    ("maybach", "👑 Элит"),
+]
 
 # ==========================
 # Инициализация БД
@@ -2048,8 +2057,12 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_ADDITIONAL,
     WAIT_CHILD_SEAT_TYPE,
     WAIT_COMMENT,
-    WAIT_PRICE_FROM,
-    WAIT_PRICE_TO,
+    WAIT_PRICE_CITY_FROM,
+    WAIT_PRICE_ADDRESS_FROM,
+    WAIT_PRICE_CITY_TO,
+    WAIT_PRICE_ADDRESS_TO,
+    WAIT_PRICE_TARIFF,
+    WAIT_PRICE_DECISION,
     WAIT_ORDER_CONFIRM,
     WAIT_REPLACEMENT_FIELD,
     WAIT_ADMIN_MESSAGE,
@@ -2058,7 +2071,7 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_ADMIN_BROADCAST,
     WAIT_PAYMENT_PROOF,
     WAIT_BOT_BALANCE,
-) = range(20)
+) = range(24)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -2076,66 +2089,181 @@ async def order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def price_check_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["price_check"] = {}
     await update.message.reply_text(
-        "💸 <b>Проверка цены</b>\n\n🧭 Введите адрес отправления (Такси от Майка)",
+        "💸 <b>Проверка цены</b>\n\n🏙️ Введите город/посёлок для точки А:",
         reply_markup=taxi_force_reply_markup(),
         parse_mode="HTML",
     )
-    return WAIT_PRICE_FROM
+    return WAIT_PRICE_CITY_FROM
+
+
+async def price_city_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.setdefault("price_check", {})["city_from"] = update.message.text.strip()
+    await update.message.reply_text(
+        "🏠 Введите адрес и дом для точки А (пример: Ленина, 26)",
+        reply_markup=taxi_force_reply_markup(),
+    )
+    return WAIT_PRICE_ADDRESS_FROM
 
 
 async def price_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.setdefault("price_check", {})["address_from"] = update.message.text
+    context.user_data.setdefault("price_check", {})["address_from"] = update.message.text.strip()
     await update.message.reply_text(
-        "📍 Введите адрес назначения (Такси от Майка)",
+        "🏙️ Введите город/посёлок для точки Б:",
         reply_markup=taxi_force_reply_markup(),
     )
-    return WAIT_PRICE_TO
+    return WAIT_PRICE_CITY_TO
+
+
+async def price_city_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.setdefault("price_check", {})["city_to"] = update.message.text.strip()
+    await update.message.reply_text(
+        "🏠 Введите адрес и дом для точки Б (пример: Ленина, 26)",
+        reply_markup=taxi_force_reply_markup(),
+    )
+    return WAIT_PRICE_ADDRESS_TO
 
 
 async def price_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data.setdefault("price_check", {})
-    data["address_to"] = update.message.text
+    data["address_to"] = update.message.text.strip()
+    await update.message.reply_text(
+        "🚘 Выберите тариф:",
+        reply_markup=price_tariff_keyboard(),
+    )
+    return WAIT_PRICE_TARIFF
 
+
+async def price_tariff_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = context.user_data.setdefault("price_check", {})
+    tariff = query.data.split("_", 2)[2]
+    data["tariff"] = tariff
+
+    city_from = data.get("city_from")
     address_from = data.get("address_from")
+    city_to = data.get("city_to")
     address_to = data.get("address_to")
-    if not address_from or not address_to:
-        await update.message.reply_text(
+    if not all([city_from, address_from, city_to, address_to]):
+        await query.message.reply_text(
             "Не удалось прочитать адреса. Попробуйте снова.",
-            reply_markup=main_menu_keyboard(update.effective_user.id),
+            reply_markup=main_menu_keyboard(query.from_user.id),
         )
         return ConversationHandler.END
 
-    await update.message.reply_text("⏳ Считаю стоимость, подождите немного...")
+    full_from = f"{address_from}, {city_from}"
+    full_to = f"{address_to}, {city_to}"
+    data["full_from"] = full_from
+    data["full_to"] = full_to
+
+    await query.message.reply_text("⏳ Считаю стоимость, подождите немного...")
     try:
-        price, price_class = fetch_yandex_price(address_from, address_to)
+        price, price_class = fetch_yandex_price(full_from, full_to, price_class=tariff)
     except Exception as exc:
         logger.warning("Ошибка расчёта цены: %s", exc)
-        await update.message.reply_text(
+        await query.message.reply_text(
             "Не удалось получить цену. Попробуйте позже.",
-            reply_markup=main_menu_keyboard(update.effective_user.id),
+            reply_markup=main_menu_keyboard(query.from_user.id),
         )
         return ConversationHandler.END
 
     if not price:
-        await update.message.reply_text(
+        await query.message.reply_text(
             "😔 Не удалось найти цену по указанным адресам.\n"
             "Проверьте написание или добавьте город.",
-            reply_markup=main_menu_keyboard(update.effective_user.id),
+            reply_markup=main_menu_keyboard(query.from_user.id),
         )
         return ConversationHandler.END
 
-    await update.message.reply_text(
+    try:
+        price_value = float(str(price).replace(",", "."))
+    except ValueError:
+        price_value = None
+
+    if price_value is None:
+        await query.message.reply_text(
+            "😔 Не удалось распознать цену. Попробуйте уточнить адреса.",
+            reply_markup=main_menu_keyboard(query.from_user.id),
+        )
+        return ConversationHandler.END
+
+    our_price = round(price_value * 0.55, 2)
+    data["app_price"] = price_value
+    data["our_price"] = our_price
+    data["price_class"] = price_class
+
+    await query.message.reply_text(
         (
             "✅ <b>Цена найдена</b>\n\n"
-            f"🚩 <b>Откуда:</b> {address_from}\n"
-            f"🎯 <b>Куда:</b> {address_to}\n"
-            f"🚘 <b>Тариф:</b> {price_class}\n"
-            f"💰 <b>Цена:</b> {price} ₽"
+            f"🚩 <b>Откуда:</b> {full_from}\n"
+            f"🎯 <b>Куда:</b> {full_to}\n"
+            f"🚘 <b>Тариф:</b> {price_class}\n\n"
+            f"💰 <b>Цена в приложении:</b> <s>~{price_value:.2f} ₽</s>\n"
+            f"💸 <b>Наша цена:</b> ~{our_price:.2f} ₽"
         ),
-        reply_markup=main_menu_keyboard(update.effective_user.id),
+        reply_markup=price_decision_keyboard(),
         parse_mode="HTML",
     )
-    return ConversationHandler.END
+    return WAIT_PRICE_DECISION
+
+
+async def price_order_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "price_order_no":
+        await query.message.reply_text(
+            "Возврат в главное меню.",
+            reply_markup=main_menu_keyboard(query.from_user.id),
+        )
+        return ConversationHandler.END
+
+    if query.data == "price_order_cancel":
+        await query.message.reply_text(
+            "Возврат в главное меню.",
+            reply_markup=main_menu_keyboard(query.from_user.id),
+        )
+        return ConversationHandler.END
+
+    data = context.user_data.get("price_check", {})
+    if not data:
+        await query.message.reply_text(
+            "Данные для заказа не найдены.",
+            reply_markup=main_menu_keyboard(query.from_user.id),
+        )
+        return ConversationHandler.END
+
+    our_price = data.get("our_price")
+    our_price_text = f"{our_price:.2f} ₽" if isinstance(our_price, (int, float)) else "не указано"
+
+    context.user_data["order_type"] = "price"
+    context.user_data["order_data"] = {
+        "city": data.get("city_from"),
+        "address_from": data.get("full_from"),
+        "address_to": data.get("full_to"),
+        "tariff": data.get("price_class") or data.get("tariff"),
+        "comment": (
+            f"Цена в приложении: {data.get('app_price'):.2f} ₽; "
+            f"наша цена: {data.get('our_price'):.2f} ₽"
+            if data.get("app_price") is not None and data.get("our_price") is not None
+            else None
+        ),
+        "app_price": data.get("app_price"),
+        "our_price": data.get("our_price"),
+    }
+
+    await query.message.reply_text(
+        (
+            "🧾 <b>Готовим заказ</b>\n\n"
+            f"🚩 <b>Откуда:</b> {data.get('full_from')}\n"
+            f"🎯 <b>Куда:</b> {data.get('full_to')}\n"
+            f"🚘 <b>Тариф:</b> {data.get('price_class') or data.get('tariff')}\n"
+            f"💸 <b>Наша цена:</b> ~{our_price_text}\n\n"
+            "Подтвердить отправку заказа?"
+        ),
+        reply_markup=order_confirmation_keyboard(),
+        parse_mode="HTML",
+    )
+    return WAIT_ORDER_CONFIRM
 async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2181,6 +2309,24 @@ def order_confirmation_keyboard():
         [InlineKeyboardButton("Отправить", callback_data="order_confirm_send")],
         [InlineKeyboardButton("Отменить", callback_data="order_confirm_cancel")],
     ])
+
+
+def price_tariff_keyboard():
+    buttons = [
+        [InlineKeyboardButton(label, callback_data=f"price_tariff_{code}")]
+        for code, label in PRICE_TARIFFS
+    ]
+    buttons.append([InlineKeyboardButton("🏠 В меню", callback_data="price_order_cancel")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def price_decision_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Оформить заказ", callback_data="price_order_yes")],
+            [InlineKeyboardButton("🏠 В меню", callback_data="price_order_no")],
+        ]
+    )
 
 
 def _normalize_point(value) -> list[float] | None:
@@ -2283,8 +2429,9 @@ def _extract_price_from_json(payload, preferred_class: str | None = None) -> tup
     return None, None
 
 
-def fetch_yandex_price(part_a: str, part_b: str) -> tuple[str | None, str | None]:
+def fetch_yandex_price(part_a: str, part_b: str, price_class: str | None = None) -> tuple[str | None, str | None]:
     token = YANDEX_TAXI_TOKEN
+    price_class = price_class or YANDEX_PRICE_CLASS
     suggest_url = (
         "https://tc.mobile.yandex.net/4.0/persuggest/v1/suggest"
         "?mobcf=russia%25go_ru_by_geo_hosts_2%25default&mobpr=go_ru_by_geo_hosts_2_TAXI_V4_0"
@@ -2567,8 +2714,8 @@ def fetch_yandex_price(part_a: str, part_b: str) -> tuple[str | None, str | None
         timeout=25,
     )
     route_response.raise_for_status()
-    price, class_name = _extract_price_from_json(route_response.json(), YANDEX_PRICE_CLASS)
-    return price, class_name or YANDEX_PRICE_CLASS
+    price, class_name = _extract_price_from_json(route_response.json(), price_class)
+    return price, class_name or price_class
 
 
 def build_order_preview_text(order_data, order_type):
@@ -2815,7 +2962,26 @@ async def order_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     wishes = data.get('wishes')
     wishes_text = ", ".join(wishes) if isinstance(wishes, (list, tuple, set)) else wishes
 
-    if order_type == "text":
+    if order_type == "price":
+        app_price = data.get("app_price")
+        our_price = data.get("our_price")
+        order_id = create_order(
+            tg_id=query.from_user.id,
+            type_="text",
+            bot_token=context.bot.token,
+            city=data.get("city"),
+            address_from=data.get("address_from"),
+            address_to=data.get("address_to"),
+            tariff=data.get("tariff"),
+            comment=data.get("comment"),
+        )
+        if app_price is not None and our_price is not None:
+            update_order_fields(
+                order_id,
+                base_amount=app_price,
+                amount=our_price,
+            )
+    elif order_type == "text":
         order_id = create_order(
             tg_id=query.from_user.id,
             type_="text",
@@ -2972,6 +3138,11 @@ async def notify_admins(context, order_id):
         parts.append(f"Пожелания: {order.get('wishes')}")
     if order.get("comment"):
         parts.append(f"Комментарий: {order.get('comment')}")
+    if order.get("base_amount") or order.get("amount"):
+        base_amount = order.get("base_amount") or 0
+        amount = order.get("amount") or 0
+        parts.append(f"Цена в приложении: {base_amount:.2f} ₽")
+        parts.append(f"Наша цена: {amount:.2f} ₽")
 
     text = "\n".join(parts)
 
@@ -4017,8 +4188,12 @@ def configure_application(app):
     price_conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(f"^{re.escape(PRICE_BTN)}$"), price_check_start)],
         states={
-            WAIT_PRICE_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_address_from)],
-            WAIT_PRICE_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_address_to)],
+            WAIT_PRICE_CITY_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_city_from)],
+            WAIT_PRICE_ADDRESS_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_address_from)],
+            WAIT_PRICE_CITY_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_city_to)],
+            WAIT_PRICE_ADDRESS_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_address_to)],
+            WAIT_PRICE_TARIFF: [CallbackQueryHandler(price_tariff_selected, pattern="^price_tariff_")],
+            WAIT_PRICE_DECISION: [CallbackQueryHandler(price_order_decision, pattern="^price_order_")],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
@@ -4132,8 +4307,6 @@ def configure_application(app):
             await help_menu(update, context)
         elif text == ORDER_BTN:
             await order_menu(update, context)
-        elif text == PRICE_BTN:
-            return
         elif text == FAQ_BTN:
             await update.message.reply_text(
                 "Откройте ответы на частые вопросы:", reply_markup=faq_keyboard()
