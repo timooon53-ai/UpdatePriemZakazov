@@ -2138,7 +2138,8 @@ async def price_tariff_selected(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     data = context.user_data.setdefault("price_check", {})
     tariff = query.data.split("_", 2)[2]
-    data["tariff"] = tariff
+    data["tariff_code"] = tariff
+    data["tariff_label"] = get_price_tariff_label(tariff)
 
     city_from = data.get("city_from")
     address_from = data.get("address_from")
@@ -2188,13 +2189,14 @@ async def price_tariff_selected(update: Update, context: ContextTypes.DEFAULT_TY
     data["app_price"] = price_value
     data["our_price"] = our_price
     data["price_class"] = price_class
+    data["price_label"] = get_price_tariff_label(price_class) or data.get("tariff_label")
 
     await query.message.reply_text(
         (
             "✅ <b>Цена найдена</b>\n\n"
             f"🚩 <b>Откуда:</b> {full_from}\n"
             f"🎯 <b>Куда:</b> {full_to}\n"
-            f"🚘 <b>Тариф:</b> {price_class}\n\n"
+            f"🚘 <b>Тариф:</b> {data.get('price_label') or price_class}\n\n"
             f"💰 <b>Цена в приложении:</b> <s>~{price_value:.2f} ₽</s>\n"
             f"💸 <b>Наша цена:</b> ~{our_price:.2f} ₽"
         ),
@@ -2237,7 +2239,7 @@ async def price_order_decision(update: Update, context: ContextTypes.DEFAULT_TYP
         "city": data.get("city_from"),
         "address_from": data.get("full_from"),
         "address_to": data.get("full_to"),
-        "tariff": data.get("price_class") or data.get("tariff"),
+        "tariff": data.get("price_label") or data.get("tariff_label") or data.get("price_class") or data.get("tariff_code"),
         "comment": (
             f"Цена в приложении: {data.get('app_price'):.2f} ₽; "
             f"наша цена: {data.get('our_price'):.2f} ₽"
@@ -2253,7 +2255,7 @@ async def price_order_decision(update: Update, context: ContextTypes.DEFAULT_TYP
             "🧾 <b>Готовим заказ</b>\n\n"
             f"🚩 <b>Откуда:</b> {data.get('full_from')}\n"
             f"🎯 <b>Куда:</b> {data.get('full_to')}\n"
-            f"🚘 <b>Тариф:</b> {data.get('price_class') or data.get('tariff')}\n"
+            f"🚘 <b>Тариф:</b> {data.get('price_label') or data.get('tariff_label') or data.get('price_class') or data.get('tariff_code')}\n"
             f"💸 <b>Наша цена:</b> ~{our_price_text}\n\n"
             "Подтвердить отправку заказа?"
         ),
@@ -2306,6 +2308,15 @@ def order_confirmation_keyboard():
         [InlineKeyboardButton("Отправить", callback_data="order_confirm_send")],
         [InlineKeyboardButton("Отменить", callback_data="order_confirm_cancel")],
     ])
+
+
+def get_price_tariff_label(tariff_code: str | None) -> str | None:
+    if not tariff_code:
+        return None
+    for code, label in PRICE_TARIFFS:
+        if code == tariff_code:
+            return label
+    return tariff_code
 
 
 def price_tariff_keyboard():
@@ -4216,6 +4227,7 @@ def configure_application(app):
             WAIT_PRICE_ADDRESS_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_address_to)],
             WAIT_PRICE_TARIFF: [CallbackQueryHandler(price_tariff_selected, pattern="^price_tariff_")],
             WAIT_PRICE_DECISION: [CallbackQueryHandler(price_order_decision, pattern="^price_order_")],
+            WAIT_ORDER_CONFIRM: [CallbackQueryHandler(order_confirmation, pattern="^order_confirm_")],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
