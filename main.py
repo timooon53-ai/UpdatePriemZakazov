@@ -4229,6 +4229,7 @@ def configure_application(app):
             WAIT_PRICE_ADDRESS_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_address_to)],
             WAIT_PRICE_TARIFF: [CallbackQueryHandler(price_tariff_selected, pattern="^price_tariff_")],
             WAIT_PRICE_DECISION: [CallbackQueryHandler(price_order_decision, pattern="^price_order_")],
+            WAIT_ORDER_CONFIRM: [CallbackQueryHandler(order_confirmation, pattern="^order_confirm_")],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
