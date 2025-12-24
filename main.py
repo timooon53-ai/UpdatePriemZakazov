@@ -2076,8 +2076,9 @@ async def order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def price_check_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["price_check"] = {}
     await update.message.reply_text(
-        "🧭 Введите адрес отправления для расчёта цены (Такси от Майка)",
+        "💸 <b>Проверка цены</b>\n\n🧭 Введите адрес отправления (Такси от Майка)",
         reply_markup=taxi_force_reply_markup(),
+        parse_mode="HTML",
     )
     return WAIT_PRICE_FROM
 
@@ -2085,7 +2086,7 @@ async def price_check_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def price_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault("price_check", {})["address_from"] = update.message.text
     await update.message.reply_text(
-        "📍 Введите адрес назначения для расчёта цены (Такси от Майка)",
+        "📍 Введите адрес назначения (Такси от Майка)",
         reply_markup=taxi_force_reply_markup(),
     )
     return WAIT_PRICE_TO
@@ -2104,7 +2105,7 @@ async def price_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    await update.message.reply_text("⏳ Проверяю цену, подождите...")
+    await update.message.reply_text("⏳ Считаю стоимость, подождите немного...")
     try:
         price, price_class = fetch_yandex_price(address_from, address_to)
     except Exception as exc:
@@ -2117,20 +2118,22 @@ async def price_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not price:
         await update.message.reply_text(
-            "Цена не найдена по указанным адресам. Попробуйте уточнить адреса.",
+            "😔 Не удалось найти цену по указанным адресам.\n"
+            "Проверьте написание или добавьте город.",
             reply_markup=main_menu_keyboard(update.effective_user.id),
         )
         return ConversationHandler.END
 
     await update.message.reply_text(
         (
-            "💸 Стоимость поездки рассчитана:\n"
-            f"Откуда: {address_from}\n"
-            f"Куда: {address_to}\n"
-            f"Тариф: {price_class}\n"
-            f"Цена: {price} ₽"
+            "✅ <b>Цена найдена</b>\n\n"
+            f"🚩 <b>Откуда:</b> {address_from}\n"
+            f"🎯 <b>Куда:</b> {address_to}\n"
+            f"🚘 <b>Тариф:</b> {price_class}\n"
+            f"💰 <b>Цена:</b> {price} ₽"
         ),
         reply_markup=main_menu_keyboard(update.effective_user.id),
+        parse_mode="HTML",
     )
     return ConversationHandler.END
 async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2434,11 +2437,11 @@ def fetch_yandex_price(part_a: str, part_b: str) -> tuple[str | None, str | None
         "X-Mob-ID": "c76e6e2552f348b898891dd672fa5daa",
     }
     route_zone = "moscow"
-    combined = f\"{part_a} {part_b}\".lower()
-    if \"омск\" in combined:
-        route_zone = \"omsk\"
-    elif \"москва\" in combined or \"moscow\" in combined:
-        route_zone = \"moscow\"
+    combined = f"{part_a} {part_b}".lower()
+    if "омск" in combined:
+        route_zone = "omsk"
+    elif "москва" in combined or "moscow" in combined:
+        route_zone = "moscow"
 
     route_payload = {
         "supports_verticals_selector": True,
