@@ -462,6 +462,8 @@ def add_user(tg_id, username):
 def add_user_to_bot_db(tg_id: int, username: str | None, bot_token: str | None):
     if not bot_token:
         return
+    if not get_bot_by_token(bot_token) and bot_token != PRIMARY_BOT_TOKEN:
+        create_bot_storage(bot_token, 0, "Подключённый бот")
     bot_db = get_bot_db_path(bot_token)
     init_db(bot_db)
     log_franchise_user_by_token(bot_token, tg_id, username)
@@ -4227,7 +4229,6 @@ def configure_application(app):
             WAIT_PRICE_ADDRESS_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_address_to)],
             WAIT_PRICE_TARIFF: [CallbackQueryHandler(price_tariff_selected, pattern="^price_tariff_")],
             WAIT_PRICE_DECISION: [CallbackQueryHandler(price_order_decision, pattern="^price_order_")],
-            WAIT_ORDER_CONFIRM: [CallbackQueryHandler(order_confirmation, pattern="^order_confirm_")],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
@@ -4271,6 +4272,7 @@ def configure_application(app):
     app.add_handler(price_conv_handler)
     app.add_handler(admin_conv_handler)
     app.add_handler(payment_conv)
+    app.add_handler(CallbackQueryHandler(order_confirmation, pattern="^order_confirm_"))
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
