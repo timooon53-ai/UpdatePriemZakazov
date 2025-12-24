@@ -2213,6 +2213,27 @@ def _find_point_in_json(payload, keys: tuple[str, ...]) -> list[float] | None:
     return None
 
 
+def _extract_suggest_point(payload) -> list[float] | None:
+    if isinstance(payload, dict):
+        suggests = payload.get("suggests") or payload.get("results") or payload.get("items")
+        if isinstance(suggests, list):
+            for item in suggests:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("point", "position", "center", "geo_point", "geopoint"):
+                    normalized = _normalize_point(item.get(key))
+                    if normalized:
+                        return normalized
+                for key in ("point", "position"):
+                    inner = item.get(key)
+                    if isinstance(inner, dict):
+                        for inner_key in ("point", "position", "pos", "coords", "coordinates"):
+                            normalized = _normalize_point(inner.get(inner_key))
+                            if normalized:
+                                return normalized
+    return _find_point_in_json(payload, ("point", "position", "geopoint", "geo_point", "center"))
+
+
 def _extract_price_from_json(payload, preferred_class: str | None = None) -> tuple[str | None, str | None]:
     candidates: list[tuple[str, str | None]] = []
 
@@ -2223,6 +2244,22 @@ def _extract_price_from_json(payload, preferred_class: str | None = None) -> tup
                 class_name = value.get("class")
                 if isinstance(pin, str):
                     match = re.search(r"Отсюда[\\s\\u00A0\\u202F]*([0-9]+)", pin)
+                    if match:
+                        candidates.append((match.group(1), class_name))
+            if "price" in value and "class" in value:
+                class_name = value.get("class")
+                price_value = value.get("price")
+                if isinstance(price_value, dict):
+                    for key in ("value", "amount", "price", "raw", "int"):
+                        if key in price_value and isinstance(price_value[key], (int, float, str)):
+                            candidates.append((str(price_value[key]), class_name))
+                elif isinstance(price_value, (int, float, str)):
+                    candidates.append((str(price_value), class_name))
+            if "formatted_price" in value and "class" in value:
+                class_name = value.get("class")
+                formatted = value.get("formatted_price")
+                if isinstance(formatted, str):
+                    match = re.search(r"([0-9]+)", formatted)
                     if match:
                         candidates.append((match.group(1), class_name))
             for item in value.values():
@@ -2354,7 +2391,7 @@ def fetch_yandex_price(part_a: str, part_b: str) -> tuple[str | None, str | None
         timeout=20,
     )
     response_a.raise_for_status()
-    point_a = _find_point_in_json(response_a.json(), ("point", "position"))
+    point_a = _extract_suggest_point(response_a.json())
     if not point_a:
         return None, None
 
@@ -2365,7 +2402,7 @@ def fetch_yandex_price(part_a: str, part_b: str) -> tuple[str | None, str | None
         timeout=20,
     )
     response_b.raise_for_status()
-    point_b = _find_point_in_json(response_b.json(), ("position", "point"))
+    point_b = _extract_suggest_point(response_b.json())
     if not point_b:
         return None, None
 
@@ -2396,6 +2433,13 @@ def fetch_yandex_price(part_a: str, part_b: str) -> tuple[str | None, str | None
         "Accept-Encoding": "gzip, deflate, br",
         "X-Mob-ID": "c76e6e2552f348b898891dd672fa5daa",
     }
+    route_zone = "moscow"
+    combined = f\"{part_a} {part_b}\".lower()
+    if \"омск\" in combined:
+        route_zone = \"omsk\"
+    elif \"москва\" in combined or \"moscow\" in combined:
+        route_zone = \"moscow\"
+
     route_payload = {
         "supports_verticals_selector": True,
         "id": "08a2d06810664758a42dee25bb0220ec",
@@ -2497,7 +2541,7 @@ def fetch_yandex_price(part_a: str, part_b: str) -> tuple[str | None, str | None
         },
         "route": [point_a, point_b],
         "payment": {"type": "cash"},
-        "zone_name": "moscow",
+        "zone_name": route_zone,
         "account_type": "lite",
         "summary_version": 2,
         "format_currency": True,
