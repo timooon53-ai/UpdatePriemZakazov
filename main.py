@@ -2211,60 +2211,13 @@ async def price_tariff_selected(update: Update, context: ContextTypes.DEFAULT_TY
 async def price_order_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == "price_order_no":
+    if query.data == "price_back":
         await query.message.reply_text(
             "Возврат в главное меню.",
             reply_markup=main_menu_keyboard(query.from_user.id),
         )
         return ConversationHandler.END
-
-    if query.data == "price_order_cancel":
-        await query.message.reply_text(
-            "Возврат в главное меню.",
-            reply_markup=main_menu_keyboard(query.from_user.id),
-        )
-        return ConversationHandler.END
-
-    data = context.user_data.get("price_check", {})
-    if not data:
-        await query.message.reply_text(
-            "Данные для заказа не найдены.",
-            reply_markup=main_menu_keyboard(query.from_user.id),
-        )
-        return ConversationHandler.END
-
-    our_price = data.get("our_price")
-    our_price_text = f"{our_price:.2f} ₽" if isinstance(our_price, (int, float)) else "не указано"
-
-    context.user_data["order_type"] = "price"
-    context.user_data["order_data"] = {
-        "city": data.get("city_from"),
-        "address_from": data.get("full_from"),
-        "address_to": data.get("full_to"),
-        "tariff": data.get("price_label") or data.get("tariff_label") or data.get("price_class") or data.get("tariff_code"),
-        "comment": (
-            f"Цена в приложении: {data.get('app_price'):.2f} ₽; "
-            f"наша цена: {data.get('our_price'):.2f} ₽"
-            if data.get("app_price") is not None and data.get("our_price") is not None
-            else None
-        ),
-        "app_price": data.get("app_price"),
-        "our_price": data.get("our_price"),
-    }
-
-    await query.message.reply_text(
-        (
-            "🧾 <b>Готовим заказ</b>\n\n"
-            f"🚩 <b>Откуда:</b> {data.get('full_from')}\n"
-            f"🎯 <b>Куда:</b> {data.get('full_to')}\n"
-            f"🚘 <b>Тариф:</b> {data.get('price_label') or data.get('tariff_label') or data.get('price_class') or data.get('tariff_code')}\n"
-            f"💸 <b>Наша цена:</b> ~{our_price_text}\n\n"
-            "Подтвердить отправку заказа?"
-        ),
-        reply_markup=order_confirmation_keyboard(),
-        parse_mode="HTML",
-    )
-    return WAIT_ORDER_CONFIRM
+    return ConversationHandler.END
 async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2333,8 +2286,7 @@ def price_tariff_keyboard():
 def price_decision_keyboard():
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✅ Оформить заказ", callback_data="price_order_yes")],
-            [InlineKeyboardButton("🏠 В меню", callback_data="price_order_no")],
+            [InlineKeyboardButton("🏠 Возврат в меню", callback_data="price_back")],
         ]
     )
 
@@ -2997,26 +2949,7 @@ async def order_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     wishes = data.get('wishes')
     wishes_text = ", ".join(wishes) if isinstance(wishes, (list, tuple, set)) else wishes
 
-    if order_type == "price":
-        app_price = data.get("app_price")
-        our_price = data.get("our_price")
-        order_id = create_order(
-            tg_id=query.from_user.id,
-            type_="text",
-            bot_token=context.bot.token,
-            city=data.get("city"),
-            address_from=data.get("address_from"),
-            address_to=data.get("address_to"),
-            tariff=data.get("tariff"),
-            comment=data.get("comment"),
-        )
-        if app_price is not None and our_price is not None:
-            update_order_fields(
-                order_id,
-                base_amount=app_price,
-                amount=our_price,
-            )
-    elif order_type == "text":
+    if order_type == "text":
         order_id = create_order(
             tg_id=query.from_user.id,
             type_="text",
@@ -4228,8 +4161,7 @@ def configure_application(app):
             WAIT_PRICE_CITY_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_city_to)],
             WAIT_PRICE_ADDRESS_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_address_to)],
             WAIT_PRICE_TARIFF: [CallbackQueryHandler(price_tariff_selected, pattern="^price_tariff_")],
-            WAIT_PRICE_DECISION: [CallbackQueryHandler(price_order_decision, pattern="^price_order_")],
-            WAIT_ORDER_CONFIRM: [CallbackQueryHandler(order_confirmation, pattern="^order_confirm_")],
+            WAIT_PRICE_DECISION: [CallbackQueryHandler(price_order_decision, pattern="^price_")],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
