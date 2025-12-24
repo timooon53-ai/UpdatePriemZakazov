@@ -185,6 +185,16 @@ ADMIN_BTN = "Админка 🎅"
 BACK_BTN = "Назад ⛄️"
 FAQ_BTN = "FAQ 📚"
 
+MAIN_MENU_BUTTONS = {
+    PROFILE_BTN,
+    ORDER_BTN,
+    HELP_BTN,
+    PRICE_BTN,
+    ADMIN_BTN,
+    BACK_BTN,
+    FAQ_BTN,
+}
+
 YANDEX_TAXI_TOKEN = (
     os.getenv("YANDEX_TAXI_TOKEN")
     or locals().get("YANDEX_TAXI_TOKEN")
@@ -1808,6 +1818,51 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=back_keyboard())
 
 
+async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return None
+    text = update.message.text.strip()
+    if text not in MAIN_MENU_BUTTONS:
+        return None
+
+    context.user_data.clear()
+    user_id = update.effective_user.id
+
+    if text == PROFILE_BTN:
+        await profile(update, context)
+        return ConversationHandler.END
+    if text == HELP_BTN:
+        await help_menu(update, context)
+        return ConversationHandler.END
+    if text == ORDER_BTN:
+        await order_menu(update, context)
+        return ConversationHandler.END
+    if text == PRICE_BTN:
+        return await price_check_start(update, context)
+    if text == FAQ_BTN:
+        await update.message.reply_text(
+            "Откройте ответы на частые вопросы:", reply_markup=faq_keyboard()
+        )
+        return ConversationHandler.END
+    if text == ADMIN_BTN:
+        if user_id in ADMIN_IDS:
+            await admin_show_panel(update.message)
+        else:
+            await update.message.reply_text(
+                "У вас нет доступа к админке.",
+                reply_markup=main_menu_keyboard(user_id),
+            )
+        return ConversationHandler.END
+    if text == BACK_BTN:
+        await update.message.reply_text(
+            "Возврат в главное меню",
+            reply_markup=main_menu_keyboard(user_id),
+        )
+        return ConversationHandler.END
+
+    return ConversationHandler.END
+
+
 def generate_comment():
     return str(random.randint(10**7, 10**10 - 1))
 
@@ -2099,6 +2154,9 @@ async def price_check_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def price_city_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_result = await handle_menu_button(update, context)
+    if menu_result is not None:
+        return menu_result
     context.user_data.setdefault("price_check", {})["city_from"] = update.message.text.strip()
     await update.message.reply_text(
         "🏠 Введите адрес и дом для точки А (пример: Ленина, 26)",
@@ -2108,6 +2166,9 @@ async def price_city_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def price_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_result = await handle_menu_button(update, context)
+    if menu_result is not None:
+        return menu_result
     context.user_data.setdefault("price_check", {})["address_from"] = update.message.text.strip()
     await update.message.reply_text(
         "🏙️ Введите город/посёлок для точки Б:",
@@ -2117,6 +2178,9 @@ async def price_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def price_city_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_result = await handle_menu_button(update, context)
+    if menu_result is not None:
+        return menu_result
     context.user_data.setdefault("price_check", {})["city_to"] = update.message.text.strip()
     await update.message.reply_text(
         "🏠 Введите адрес и дом для точки Б (пример: Ленина, 26)",
@@ -2126,6 +2190,9 @@ async def price_city_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def price_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_result = await handle_menu_button(update, context)
+    if menu_result is not None:
+        return menu_result
     data = context.user_data.setdefault("price_check", {})
     data["address_to"] = update.message.text.strip()
     await update.message.reply_text(
@@ -2809,6 +2876,9 @@ async def ask_address_third(update_or_query, context):
 
 
 async def text_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_result = await handle_menu_button(update, context)
+    if menu_result is not None:
+        return menu_result
     city = update.message.text
     context.user_data.setdefault('order_data', {})['city'] = city
     update_user_city(update.effective_user.id, city)
@@ -2816,17 +2886,26 @@ async def text_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return WAIT_ADDRESS_FROM
 
 async def text_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_result = await handle_menu_button(update, context)
+    if menu_result is not None:
+        return menu_result
     context.user_data.setdefault('order_data', {})['address_from'] = update.message.text
     await ask_address_to(update, context)
     return WAIT_ADDRESS_TO
 
 async def text_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_result = await handle_menu_button(update, context)
+    if menu_result is not None:
+        return menu_result
     context.user_data.setdefault('order_data', {})['address_to'] = update.message.text
     await update.message.reply_text("Хотите добавить ещё один адрес?", reply_markup=yes_no_keyboard())
     return WAIT_ADDRESS_THIRD_DECISION
 
 
 async def text_address_third(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_result = await handle_menu_button(update, context)
+    if menu_result is not None:
+        return menu_result
     context.user_data.setdefault('order_data', {})['address_extra'] = update.message.text
     await ask_tariff(update, context)
     return WAIT_TARIFF
@@ -2894,6 +2973,9 @@ async def favorite_address_callback(update: Update, context: ContextTypes.DEFAUL
     return ConversationHandler.END
 
 async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    menu_result = await handle_menu_button(update, context)
+    if menu_result is not None:
+        return menu_result
     raw_comment = (update.message.text or "").strip()
     comment = None if raw_comment.lower() == "пропустить 🎿" or raw_comment == "" else raw_comment
 
@@ -4125,7 +4207,10 @@ def configure_application(app):
     app.add_handler(CommandHandler("ban", ban_user))
 
     conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(order_type_callback, pattern="^order_")],
+        entry_points=[
+            CallbackQueryHandler(order_type_callback, pattern="^order_"),
+            MessageHandler(filters.Regex(f"^{re.escape(PRICE_BTN)}$"), price_check_start),
+        ],
         states={
             WAIT_SCREENSHOT: [MessageHandler(filters.PHOTO, screenshot_receive)],
             WAIT_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_city)],
@@ -4147,15 +4232,6 @@ def configure_application(app):
             WAIT_CHILD_SEAT_TYPE: [CallbackQueryHandler(child_seat_type_selected, pattern="^seat_type_")],
             WAIT_COMMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, text_comment)],
             WAIT_ORDER_CONFIRM: [CallbackQueryHandler(order_confirmation, pattern="^order_confirm_")],
-        },
-        fallbacks=[CommandHandler("start", start_over)],
-        per_user=True,
-        per_message=False,
-    )
-
-    price_conv_handler = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex(f"^{re.escape(PRICE_BTN)}$"), price_check_start)],
-        states={
             WAIT_PRICE_CITY_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_city_from)],
             WAIT_PRICE_ADDRESS_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_address_from)],
             WAIT_PRICE_CITY_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_city_to)],
@@ -4202,7 +4278,6 @@ def configure_application(app):
     )
 
     app.add_handler(conv_handler)
-    app.add_handler(price_conv_handler)
     app.add_handler(admin_conv_handler)
     app.add_handler(payment_conv)
     app.add_handler(CallbackQueryHandler(order_confirmation, pattern="^order_confirm_"))
