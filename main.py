@@ -2213,15 +2213,34 @@ def _find_point_in_json(payload, keys: tuple[str, ...]) -> list[float] | None:
     return None
 
 
-def _extract_price(source: str, price_class: str) -> str | None:
-    pattern = (
-        r'"pin_description"\\s*:\\s*"Отсюда[\\s\\u00A0\\u202F]*([0-9]+)[^"]*"'
-        rf'\\s*,\\s*"class"\\s*:\\s*"{re.escape(price_class)}"'
-    )
-    match = re.search(pattern, source)
-    if not match:
-        return None
-    return match.group(1)
+def _extract_price_from_json(payload, preferred_class: str | None = None) -> tuple[str | None, str | None]:
+    candidates: list[tuple[str, str | None]] = []
+
+    def _walk(value):
+        if isinstance(value, dict):
+            if "pin_description" in value:
+                pin = value.get("pin_description")
+                class_name = value.get("class")
+                if isinstance(pin, str):
+                    match = re.search(r"Отсюда[\\s\\u00A0\\u202F]*([0-9]+)", pin)
+                    if match:
+                        candidates.append((match.group(1), class_name))
+            for item in value.values():
+                _walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                _walk(item)
+
+    _walk(payload)
+
+    if preferred_class:
+        for price, class_name in candidates:
+            if class_name == preferred_class:
+                return price, class_name
+
+    if candidates:
+        return candidates[0][0], candidates[0][1]
+    return None, None
 
 
 def fetch_yandex_price(part_a: str, part_b: str) -> tuple[str | None, str | None]:
@@ -2501,8 +2520,8 @@ def fetch_yandex_price(part_a: str, part_b: str) -> tuple[str | None, str | None
         timeout=25,
     )
     route_response.raise_for_status()
-    price = _extract_price(route_response.text, YANDEX_PRICE_CLASS)
-    return price, YANDEX_PRICE_CLASS
+    price, class_name = _extract_price_from_json(route_response.json(), YANDEX_PRICE_CLASS)
+    return price, class_name or YANDEX_PRICE_CLASS
 
 
 def build_order_preview_text(order_data, order_type):
