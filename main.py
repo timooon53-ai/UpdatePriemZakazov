@@ -28,7 +28,7 @@ from telegram import (
     ReplyKeyboardMarkup, KeyboardButton, Bot, ReplyKeyboardRemove, ForceReply, InputFile,
 )
 from telegram.constants import ChatAction
-from telegram.error import Forbidden, InvalidToken
+from telegram.error import Forbidden, InvalidToken, Conflict
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler, ConversationHandler,
@@ -210,6 +210,15 @@ PRICE_TARIFFS = [
     ("ultimate", "✨ Премьер"),
     ("maybach", "👑 Элит"),
 ]
+
+ORDER_TARIFF_PRICE_CLASS = {
+    "Эконом": "econom",
+    "Комфорт": "business",
+    "Комфорт+": "comfortplus",
+    "Бизнес": "vip",
+    "Премьер": "ultimate",
+    "Элит": "maybach",
+}
 
 # ==========================
 # Инициализация БД
@@ -472,6 +481,7 @@ def add_user(tg_id, username):
 def add_user_to_bot_db(tg_id: int, username: str | None, bot_token: str | None):
     if not bot_token:
         return
+    add_user(tg_id, username)
     if not get_bot_by_token(bot_token) and bot_token != PRIMARY_BOT_TOKEN:
         create_bot_storage(bot_token, 0, "Подключённый бот")
     bot_db = get_bot_db_path(bot_token)
@@ -2772,6 +2782,50 @@ def fetch_yandex_price(part_a: str, part_b: str, price_class: str | None = None)
     return price, class_name or price_class
 
 
+def map_order_tariff_to_price_class(tariff_label: str | None) -> str | None:
+    if not tariff_label:
+        return None
+    return ORDER_TARIFF_PRICE_CLASS.get(tariff_label.strip())
+
+
+async def ensure_text_order_price(order_data: dict) -> None:
+    city = order_data.get("city")
+    addr_from = order_data.get("address_from")
+    addr_to = order_data.get("address_to")
+    if not (city and addr_from and addr_to):
+        return
+
+    price_key = (city, addr_from, addr_to, order_data.get("tariff"))
+    if order_data.get("price_key") == price_key and order_data.get("app_price") is not None:
+        return
+
+    price_class = map_order_tariff_to_price_class(order_data.get("tariff")) or YANDEX_PRICE_CLASS
+    full_from = f"{city}, {addr_from}"
+    full_to = f"{city}, {addr_to}"
+
+    try:
+        price, class_name = await asyncio.to_thread(
+            fetch_yandex_price,
+            full_from,
+            full_to,
+            price_class=price_class,
+        )
+    except Exception as exc:
+        logger.error("Не удалось получить цену для заказа: %s", exc)
+        return
+
+    price_value = _parse_price_value(price)
+    if price_value is None:
+        return
+
+    our_price = round(price_value * 0.55, 2)
+    order_data["price_key"] = price_key
+    order_data["app_price"] = price_value
+    order_data["our_price"] = our_price
+    order_data["price_class"] = class_name or price_class
+    order_data["price_label"] = get_price_tariff_label(class_name or price_class)
+
+
 def build_order_preview_text(order_data, order_type):
     parts = ["🎄✨ Проверьте данные заказа:"]
     parts.append(f"📸 Формат: {'🖼️ Скриншот' if order_type == 'screenshot' else '📝 Текст'}")
@@ -2797,6 +2851,13 @@ def build_order_preview_text(order_data, order_type):
 
     comment = order_data.get('comment')
     parts.append(f"📝 Комментарий: {comment if comment else 'не указан'}")
+
+    if order_data.get("app_price") is not None and order_data.get("our_price") is not None:
+        price_label = order_data.get("price_label") or order_data.get("tariff")
+        if price_label:
+            parts.append(f"🚘 Тариф для цены: {price_label}")
+        parts.append(f"💰 Цена в приложении: ~{order_data['app_price']:.2f} ₽")
+        parts.append(f"🎁 Наша цена: {order_data['our_price']:.2f} ₽")
 
     if order_type == "screenshot":
         parts.append("🖼️ Скриншот: прикреплён")
@@ -2996,6 +3057,8 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
             return ConversationHandler.END
 
+        await ensure_text_order_price(data)
+
     await send_order_preview(update, context)
     return WAIT_ORDER_CONFIRM
 
@@ -3046,6 +3109,12 @@ async def order_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             wishes=wishes_text,
             comment=comment,
         )
+        if data.get("app_price") is not None and data.get("our_price") is not None:
+            update_order_fields(
+                order_id,
+                base_amount=data.get("app_price"),
+                amount=data.get("our_price"),
+            )
     else:
         order_id = context.user_data.get('order_id')
         if not order_id:
@@ -3455,6 +3524,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_id = int(data.split("_")[1])
         context.user_data['order_id'] = order_id
         order = get_order(order_id)
+        if not order:
+            await query.answer("Заказ не найден", show_alert=True)
+            return ConversationHandler.END
         order_bot = get_order_bot(order)
         tg_id = order.get("tg_id")
         found_frames = [
@@ -3743,6 +3815,9 @@ async def admin_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = update.message.text
     order_id = context.user_data.get('order_id')
     order = get_order(order_id)
+    if not order:
+        await update.message.reply_text("Заказ не найден.", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
     order_bot = get_order_bot(order)
     tg_id = order.get("tg_id")
     await order_bot.send_message(tg_id, f"🔔 Сообщение от администратора:\n{text}")
@@ -3964,6 +4039,19 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sent = 0
     failed = 0
     blocked = 0
+    photo_bytes = None
+
+    if photo:
+        try:
+            file = await photo.get_file()
+            photo_bytes = await file.download_as_bytearray()
+        except Exception as exc:
+            logger.error("Не удалось скачать фото для рассылки: %s", exc)
+            await status_message.edit_text(
+                "⚠️ Не удалось скачать фото для рассылки.",
+                reply_markup=admin_panel_keyboard(),
+            )
+            return ConversationHandler.END
 
     bots = [{"token": PRIMARY_BOT_TOKEN, "db_path": DB_PATH, "title": "Основной"}]
     bots.extend(list_all_bots())
@@ -3976,7 +4064,7 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         seen_tokens.add(token)
         db_path = bot_record.get("db_path") or DB_PATH
         try:
-            bot_instance = Bot(token=token, request=HTTPXRequest(**REQUEST_TIMEOUTS))
+            bot_instance = get_bot_client(token)
         except InvalidToken as e:
             await notify_admins_invalid_bot(token, str(e), bot_record.get("owner_id"))
             delete_bot_by_token(token)
@@ -3987,7 +4075,8 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 action = ChatAction.UPLOAD_PHOTO if photo else ChatAction.TYPING
                 await bot_instance.send_chat_action(uid, action)
                 if photo:
-                    await bot_instance.send_photo(uid, photo=photo.file_id, caption=content_text)
+                    image = InputFile(photo_bytes, filename="broadcast.jpg")
+                    await bot_instance.send_photo(uid, photo=image, caption=content_text)
                 else:
                     await bot_instance.send_message(uid, f"🎺 Такси от Майка:\n{content_text}")
                 sent += 1
@@ -4199,13 +4288,59 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Запуск нескольких ботов
 # ==========================
 RUNNING_BOTS: dict[str, asyncio.Task] = {}
+STOPPED_BOTS: set[str] = set()
+BOT_LOCKS: dict[str, Path] = {}
+
+
+def _lock_file_for_token(token: str) -> Path:
+    safe_token = safe_token_slug(token)
+    return DB_DIR / f"bot_{safe_token}.lock"
+
+
+def acquire_bot_lock(token: str) -> bool:
+    lock_path = _lock_file_for_token(token)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("x", encoding="utf-8") as lock_file:
+            lock_file.write(str(os.getpid()))
+        BOT_LOCKS[token] = lock_path
+        return True
+    except FileExistsError:
+        try:
+            existing_pid = lock_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            existing_pid = ""
+
+        if existing_pid.isdigit():
+            try:
+                os.kill(int(existing_pid), 0)
+            except Exception:
+                try:
+                    lock_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return acquire_bot_lock(token)
+
+        logger.warning(
+            "Запуск бота %s пропущен: обнаружен локальный lock (%s). "
+            "Возможен другой запущенный экземпляр.",
+            token,
+            existing_pid or "неизвестен",
+        )
+        return False
+
+
+def release_bot_lock(token: str) -> None:
+    lock_path = BOT_LOCKS.pop(token, None)
+    if not lock_path:
+        return
+    try:
+        lock_path.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.debug("Не удалось удалить lock-файл %s: %s", lock_path, exc)
 
 
 def configure_application(app):
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("ban", ban_user))
-
     conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(order_type_callback, pattern="^order_"),
@@ -4284,6 +4419,14 @@ def configure_application(app):
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
+    app.add_handler(CommandHandler("start", start_over))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("ban", ban_user))
+
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.error("Необработанная ошибка: %s", context.error, exc_info=context.error)
+
+    app.add_error_handler(error_handler)
 
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
@@ -4365,12 +4508,16 @@ def configure_application(app):
 
 
 async def launch_bot(token: str):
+    if not acquire_bot_lock(token):
+        STOPPED_BOTS.add(token)
+        return
     try:
         app = ApplicationBuilder().token(token).request(HTTPXRequest(**REQUEST_TIMEOUTS)).build()
     except InvalidToken as e:
         bot_record = delete_bot_by_token(token)
         owner_id = bot_record.get("owner_id") if bot_record else None
         await notify_admins_invalid_bot(token, str(e), owner_id)
+        release_bot_lock(token)
         return
 
     configure_application(app)
@@ -4391,6 +4538,13 @@ async def launch_bot(token: str):
         bot_record = delete_bot_by_token(token)
         owner_id = bot_record.get("owner_id") if bot_record else None
         await notify_admins_invalid_bot(token, str(e), owner_id)
+    except Conflict as e:
+        STOPPED_BOTS.add(token)
+        logger.warning(
+            "Бот %s остановлен из-за конфликта getUpdates (другой экземпляр уже запущен): %s",
+            token,
+            e,
+        )
     except Exception as e:
         bot_record = get_bot_by_token(token)
         owner_id = bot_record.get("owner_id") if bot_record else None
@@ -4402,10 +4556,18 @@ async def launch_bot(token: str):
             await app.stop()
             await app.shutdown()
         RUNNING_BOTS.pop(token, None)
+        release_bot_lock(token)
 
 
 async def ensure_bot_running(token: str):
     if not token:
+        return
+    if token in STOPPED_BOTS:
+        logger.warning(
+            "Запуск бота %s пропущен: обнаружен конфликт getUpdates. "
+            "Остановите другой экземпляр или выполните ручной перезапуск.",
+            token,
+        )
         return
     if token in RUNNING_BOTS:
         return
@@ -4419,6 +4581,9 @@ async def ensure_bot_running(token: str):
     def _on_done(done_task: asyncio.Task):
         RUNNING_BOTS.pop(token, None)
         if done_task.cancelled():
+            return
+        if token in STOPPED_BOTS:
+            logger.warning("Бот %s остановлен из-за конфликта getUpdates, автоперезапуск отключён.", token)
             return
         if done_task.exception():
             logger.error("Бот %s завершился с ошибкой: %s", token, done_task.exception())
@@ -4452,6 +4617,7 @@ async def restart_all_bots():
     for token in list(RUNNING_BOTS.keys()):
         await stop_bot(token)
 
+    STOPPED_BOTS.clear()
     await asyncio.sleep(1)
 
     for token in tokens:
