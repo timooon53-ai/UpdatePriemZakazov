@@ -28,7 +28,7 @@ from telegram import (
     ReplyKeyboardMarkup, KeyboardButton, Bot, ReplyKeyboardRemove, ForceReply, InputFile,
 )
 from telegram.constants import ChatAction
-from telegram.error import Forbidden, InvalidToken
+from telegram.error import Forbidden, InvalidToken, Conflict
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     filters, ContextTypes, CallbackQueryHandler, ConversationHandler,
@@ -4282,6 +4282,7 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Запуск нескольких ботов
 # ==========================
 RUNNING_BOTS: dict[str, asyncio.Task] = {}
+STOPPED_BOTS: set[str] = set()
 
 
 def configure_application(app):
@@ -4478,6 +4479,13 @@ async def launch_bot(token: str):
         bot_record = delete_bot_by_token(token)
         owner_id = bot_record.get("owner_id") if bot_record else None
         await notify_admins_invalid_bot(token, str(e), owner_id)
+    except Conflict as e:
+        STOPPED_BOTS.add(token)
+        logger.warning(
+            "Бот %s остановлен из-за конфликта getUpdates (другой экземпляр уже запущен): %s",
+            token,
+            e,
+        )
     except Exception as e:
         bot_record = get_bot_by_token(token)
         owner_id = bot_record.get("owner_id") if bot_record else None
@@ -4494,6 +4502,13 @@ async def launch_bot(token: str):
 async def ensure_bot_running(token: str):
     if not token:
         return
+    if token in STOPPED_BOTS:
+        logger.warning(
+            "Запуск бота %s пропущен: обнаружен конфликт getUpdates. "
+            "Остановите другой экземпляр или выполните ручной перезапуск.",
+            token,
+        )
+        return
     if token in RUNNING_BOTS:
         return
     loop = asyncio.get_running_loop()
@@ -4506,6 +4521,9 @@ async def ensure_bot_running(token: str):
     def _on_done(done_task: asyncio.Task):
         RUNNING_BOTS.pop(token, None)
         if done_task.cancelled():
+            return
+        if token in STOPPED_BOTS:
+            logger.warning("Бот %s остановлен из-за конфликта getUpdates, автоперезапуск отключён.", token)
             return
         if done_task.exception():
             logger.error("Бот %s завершился с ошибкой: %s", token, done_task.exception())
@@ -4539,6 +4557,7 @@ async def restart_all_bots():
     for token in list(RUNNING_BOTS.keys()):
         await stop_bot(token)
 
+    STOPPED_BOTS.clear()
     await asyncio.sleep(1)
 
     for token in tokens:
