@@ -211,6 +211,15 @@ PRICE_TARIFFS = [
     ("maybach", "👑 Элит"),
 ]
 
+ORDER_TARIFF_PRICE_CLASS = {
+    "Эконом": "econom",
+    "Комфорт": "business",
+    "Комфорт+": "comfortplus",
+    "Бизнес": "vip",
+    "Премьер": "ultimate",
+    "Элит": "maybach",
+}
+
 # ==========================
 # Инициализация БД
 # ==========================
@@ -472,6 +481,7 @@ def add_user(tg_id, username):
 def add_user_to_bot_db(tg_id: int, username: str | None, bot_token: str | None):
     if not bot_token:
         return
+    add_user(tg_id, username)
     if not get_bot_by_token(bot_token) and bot_token != PRIMARY_BOT_TOKEN:
         create_bot_storage(bot_token, 0, "Подключённый бот")
     bot_db = get_bot_db_path(bot_token)
@@ -2772,6 +2782,50 @@ def fetch_yandex_price(part_a: str, part_b: str, price_class: str | None = None)
     return price, class_name or price_class
 
 
+def map_order_tariff_to_price_class(tariff_label: str | None) -> str | None:
+    if not tariff_label:
+        return None
+    return ORDER_TARIFF_PRICE_CLASS.get(tariff_label.strip())
+
+
+async def ensure_text_order_price(order_data: dict) -> None:
+    city = order_data.get("city")
+    addr_from = order_data.get("address_from")
+    addr_to = order_data.get("address_to")
+    if not (city and addr_from and addr_to):
+        return
+
+    price_key = (city, addr_from, addr_to, order_data.get("tariff"))
+    if order_data.get("price_key") == price_key and order_data.get("app_price") is not None:
+        return
+
+    price_class = map_order_tariff_to_price_class(order_data.get("tariff")) or YANDEX_PRICE_CLASS
+    full_from = f"{city}, {addr_from}"
+    full_to = f"{city}, {addr_to}"
+
+    try:
+        price, class_name = await asyncio.to_thread(
+            fetch_yandex_price,
+            full_from,
+            full_to,
+            price_class=price_class,
+        )
+    except Exception as exc:
+        logger.error("Не удалось получить цену для заказа: %s", exc)
+        return
+
+    price_value = _parse_price_value(price)
+    if price_value is None:
+        return
+
+    our_price = round(price_value * 0.55, 2)
+    order_data["price_key"] = price_key
+    order_data["app_price"] = price_value
+    order_data["our_price"] = our_price
+    order_data["price_class"] = class_name or price_class
+    order_data["price_label"] = get_price_tariff_label(class_name or price_class)
+
+
 def build_order_preview_text(order_data, order_type):
     parts = ["🎄✨ Проверьте данные заказа:"]
     parts.append(f"📸 Формат: {'🖼️ Скриншот' if order_type == 'screenshot' else '📝 Текст'}")
@@ -2797,6 +2851,13 @@ def build_order_preview_text(order_data, order_type):
 
     comment = order_data.get('comment')
     parts.append(f"📝 Комментарий: {comment if comment else 'не указан'}")
+
+    if order_data.get("app_price") is not None and order_data.get("our_price") is not None:
+        price_label = order_data.get("price_label") or order_data.get("tariff")
+        if price_label:
+            parts.append(f"🚘 Тариф для цены: {price_label}")
+        parts.append(f"💰 Цена в приложении: ~{order_data['app_price']:.2f} ₽")
+        parts.append(f"🎁 Наша цена: {order_data['our_price']:.2f} ₽")
 
     if order_type == "screenshot":
         parts.append("🖼️ Скриншот: прикреплён")
@@ -2996,6 +3057,8 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
             return ConversationHandler.END
 
+        await ensure_text_order_price(data)
+
     await send_order_preview(update, context)
     return WAIT_ORDER_CONFIRM
 
@@ -3046,6 +3109,12 @@ async def order_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             wishes=wishes_text,
             comment=comment,
         )
+        if data.get("app_price") is not None and data.get("our_price") is not None:
+            update_order_fields(
+                order_id,
+                base_amount=data.get("app_price"),
+                amount=data.get("our_price"),
+            )
     else:
         order_id = context.user_data.get('order_id')
         if not order_id:
@@ -3964,6 +4033,19 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sent = 0
     failed = 0
     blocked = 0
+    photo_bytes = None
+
+    if photo:
+        try:
+            file = await photo.get_file()
+            photo_bytes = await file.download_as_bytearray()
+        except Exception as exc:
+            logger.error("Не удалось скачать фото для рассылки: %s", exc)
+            await status_message.edit_text(
+                "⚠️ Не удалось скачать фото для рассылки.",
+                reply_markup=admin_panel_keyboard(),
+            )
+            return ConversationHandler.END
 
     bots = [{"token": PRIMARY_BOT_TOKEN, "db_path": DB_PATH, "title": "Основной"}]
     bots.extend(list_all_bots())
@@ -3976,7 +4058,7 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         seen_tokens.add(token)
         db_path = bot_record.get("db_path") or DB_PATH
         try:
-            bot_instance = Bot(token=token, request=HTTPXRequest(**REQUEST_TIMEOUTS))
+            bot_instance = get_bot_client(token)
         except InvalidToken as e:
             await notify_admins_invalid_bot(token, str(e), bot_record.get("owner_id"))
             delete_bot_by_token(token)
@@ -3987,7 +4069,8 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 action = ChatAction.UPLOAD_PHOTO if photo else ChatAction.TYPING
                 await bot_instance.send_chat_action(uid, action)
                 if photo:
-                    await bot_instance.send_photo(uid, photo=photo.file_id, caption=content_text)
+                    image = InputFile(photo_bytes, filename="broadcast.jpg")
+                    await bot_instance.send_photo(uid, photo=image, caption=content_text)
                 else:
                     await bot_instance.send_message(uid, f"🎺 Такси от Майка:\n{content_text}")
                 sent += 1
@@ -4202,10 +4285,6 @@ RUNNING_BOTS: dict[str, asyncio.Task] = {}
 
 
 def configure_application(app):
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("ban", ban_user))
-
     conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(order_type_callback, pattern="^order_"),
@@ -4284,6 +4363,14 @@ def configure_application(app):
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
+    app.add_handler(CommandHandler("start", start_over))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("ban", ban_user))
+
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.error("Необработанная ошибка: %s", context.error, exc_info=context.error)
+
+    app.add_error_handler(error_handler)
 
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
