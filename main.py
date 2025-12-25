@@ -3524,6 +3524,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_id = int(data.split("_")[1])
         context.user_data['order_id'] = order_id
         order = get_order(order_id)
+        if not order:
+            await query.answer("Заказ не найден", show_alert=True)
+            return ConversationHandler.END
         order_bot = get_order_bot(order)
         tg_id = order.get("tg_id")
         found_frames = [
@@ -3812,6 +3815,9 @@ async def admin_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = update.message.text
     order_id = context.user_data.get('order_id')
     order = get_order(order_id)
+    if not order:
+        await update.message.reply_text("Заказ не найден.", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
     order_bot = get_order_bot(order)
     tg_id = order.get("tg_id")
     await order_bot.send_message(tg_id, f"🔔 Сообщение от администратора:\n{text}")
@@ -4283,6 +4289,55 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================
 RUNNING_BOTS: dict[str, asyncio.Task] = {}
 STOPPED_BOTS: set[str] = set()
+BOT_LOCKS: dict[str, Path] = {}
+
+
+def _lock_file_for_token(token: str) -> Path:
+    safe_token = safe_token_slug(token)
+    return DB_DIR / f"bot_{safe_token}.lock"
+
+
+def acquire_bot_lock(token: str) -> bool:
+    lock_path = _lock_file_for_token(token)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("x", encoding="utf-8") as lock_file:
+            lock_file.write(str(os.getpid()))
+        BOT_LOCKS[token] = lock_path
+        return True
+    except FileExistsError:
+        try:
+            existing_pid = lock_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            existing_pid = ""
+
+        if existing_pid.isdigit():
+            try:
+                os.kill(int(existing_pid), 0)
+            except Exception:
+                try:
+                    lock_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return acquire_bot_lock(token)
+
+        logger.warning(
+            "Запуск бота %s пропущен: обнаружен локальный lock (%s). "
+            "Возможен другой запущенный экземпляр.",
+            token,
+            existing_pid or "неизвестен",
+        )
+        return False
+
+
+def release_bot_lock(token: str) -> None:
+    lock_path = BOT_LOCKS.pop(token, None)
+    if not lock_path:
+        return
+    try:
+        lock_path.unlink(missing_ok=True)
+    except Exception as exc:
+        logger.debug("Не удалось удалить lock-файл %s: %s", lock_path, exc)
 
 
 def configure_application(app):
@@ -4453,12 +4508,16 @@ def configure_application(app):
 
 
 async def launch_bot(token: str):
+    if not acquire_bot_lock(token):
+        STOPPED_BOTS.add(token)
+        return
     try:
         app = ApplicationBuilder().token(token).request(HTTPXRequest(**REQUEST_TIMEOUTS)).build()
     except InvalidToken as e:
         bot_record = delete_bot_by_token(token)
         owner_id = bot_record.get("owner_id") if bot_record else None
         await notify_admins_invalid_bot(token, str(e), owner_id)
+        release_bot_lock(token)
         return
 
     configure_application(app)
@@ -4497,6 +4556,7 @@ async def launch_bot(token: str):
             await app.stop()
             await app.shutdown()
         RUNNING_BOTS.pop(token, None)
+        release_bot_lock(token)
 
 
 async def ensure_bot_running(token: str):
