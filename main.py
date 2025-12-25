@@ -4397,6 +4397,7 @@ def configure_application(app):
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
         per_message=False,
+        allow_reentry=True,
     )
 
     payment_conv = ConversationHandler(
