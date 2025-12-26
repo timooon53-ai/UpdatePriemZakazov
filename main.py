@@ -4236,37 +4236,137 @@ async def admin_bot_balance_update(update: Update, context: ContextTypes.DEFAULT
     return ConversationHandler.END
 
 
-@admin_only
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def get_owner_stats(bot_tokens: list[str]):
     from datetime import timedelta
     now = datetime.now()
     day_ago = now - timedelta(days=1)
     day_ago_str = day_ago.strftime("%Y-%m-%d %H:%M:%S")
 
+    if not bot_tokens:
+        return dict(day_sum=0, day_count=0, total_sum=0, total_count=0)
+
+    placeholders = ",".join("?" for _ in bot_tokens)
     with sqlite3.connect(ORDERS_DB) as conn:
         c = conn.cursor()
-        # Заказы за сутки
-        c.execute("SELECT SUM(amount), COUNT(*) FROM orders WHERE created_at >= ?", (day_ago_str,))
+        c.execute(
+            f"""
+            SELECT SUM(COALESCE(amount, base_amount, 0)), COUNT(*)
+            FROM orders
+            WHERE bot_token IN ({placeholders}) AND created_at >= ?
+            """,
+            (*bot_tokens, day_ago_str),
+        )
         day_sum, day_count = c.fetchone()
-        # Заказы за всё время
-        c.execute("SELECT SUM(amount), COUNT(*) FROM orders")
+        c.execute(
+            f"""
+            SELECT SUM(COALESCE(amount, base_amount, 0)), COUNT(*)
+            FROM orders
+            WHERE bot_token IN ({placeholders})
+            """,
+            bot_tokens,
+        )
         total_sum, total_count = c.fetchone()
 
-    day_sum = day_sum or 0
-    total_sum = total_sum or 0
-    day_count = day_count or 0
-    total_count = total_count or 0
+    return dict(
+        day_sum=day_sum or 0,
+        day_count=day_count or 0,
+        total_sum=total_sum or 0,
+        total_count=total_count or 0,
+    )
+
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    if user_id in ADMIN_IDS:
+        from datetime import timedelta
+        now = datetime.now()
+        day_ago = now - timedelta(days=1)
+        day_ago_str = day_ago.strftime("%Y-%m-%d %H:%M:%S")
+
+        with sqlite3.connect(ORDERS_DB) as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT SUM(COALESCE(amount, base_amount, 0)), COUNT(*) FROM orders WHERE created_at >= ?",
+                (day_ago_str,),
+            )
+            day_sum, day_count = c.fetchone()
+            c.execute("SELECT SUM(COALESCE(amount, base_amount, 0)), COUNT(*) FROM orders")
+            total_sum, total_count = c.fetchone()
+
+        summary = dict(
+            day_sum=day_sum or 0,
+            day_count=day_count or 0,
+            total_sum=total_sum or 0,
+            total_count=total_count or 0,
+        )
+        text = (
+            f"✨ <b>Статистика заказов</b>\n\n"
+            f"🎆️ Кол-во заказов за сутки: {summary['day_count']}\n"
+            f"🎆 Кол-во заказов за всё время: {summary['total_count']}\n\n"
+            f"🎁 Сумма заказов за сутки: {summary['day_sum']:.2f} ₽\n"
+            f"🎁 Сумма заказов за всё время: {summary['total_sum']:.2f} ₽\n\n"
+            f"🎉 Заработок за сутки: {summary['day_sum']:.2f} ₽\n"
+            f"🎁 Заработок за всё время: {summary['total_sum']:.2f} ₽"
+        )
+        await update.message.reply_text(text, parse_mode="HTML")
+        return
+
+    bots = list_user_bots(user_id)
+    if not bots:
+        await update.message.reply_text("🎄🚫 У вас нет подключённых франшизных ботов.")
+        return
+
+    bot_tokens = [bot.get("token") for bot in bots if bot.get("token")]
+    summary = get_owner_stats(bot_tokens)
+    pending_total = sum(float(bot.get("pending_reward") or 0) for bot in bots)
+    total_earned = summary["total_sum"]
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("💸 Вывести средства", callback_data="owner_withdraw")]]
+    )
 
     text = (
-        f"✨ <b>Статистика заказов</b>\n\n"
-        f"🎆️ Кол-во заказов за сутки: {day_count}\n"
-        f"🎆 Кол-во заказов за всё время: {total_count}\n\n"
-        f"🎁 Сумма заказов за сутки: {day_sum:.2f} ₽\n"
-        f"🎁 Сумма заказов за всё время: {total_sum:.2f} ₽\n\n"
-        f"🎉 Заработок за сутки: {day_sum:.2f} ₽\n"
-        f"🎁 Заработок за всё время: {total_sum:.2f} ₽"
+        f"✨ <b>Статистика ваших франшизных ботов</b>\n\n"
+        f"🎆️ Кол-во заказов за сутки: {summary['day_count']}\n"
+        f"🎆 Кол-во заказов за всё время: {summary['total_count']}\n\n"
+        f"🎁 Сумма заказов за сутки: {summary['day_sum']:.2f} ₽\n"
+        f"🎁 Сумма заказов за всё время: {total_earned:.2f} ₽\n\n"
+        f"💰 Заработок за всё время: {total_earned:.2f} ₽\n"
+        f"💼 Заработок до последнего обнуления: {pending_total:.2f} ₽\n"
+        f"📥 Баланс к выводу: {pending_total:.2f} ₽"
     )
-    await update.message.reply_text(text, parse_mode="HTML")
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+async def owner_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    bots = list_user_bots(user_id)
+    if not bots:
+        await query.message.reply_text("🎄🚫 У вас нет подключённых франшизных ботов.")
+        return
+
+    pending_total = sum(float(bot.get("pending_reward") or 0) for bot in bots)
+    if pending_total < 1000:
+        await query.message.reply_text("🎄🚫 Минимальная сумма для вывода — 1000 ₽.")
+        return
+
+    weekday = datetime.now().weekday()
+    if weekday not in {0, 2, 4}:
+        await query.message.reply_text(
+            "🎄🚫 Вывод средств доступен только в понедельник, среду и пятницу."
+        )
+        return
+
+    context.user_data["awaiting_withdraw_details"] = {
+        "bot_ids": [bot.get("id") for bot in bots],
+        "amount": pending_total,
+    }
+    await query.message.reply_text(
+        "💳 Введите реквизиты для вывода средств (текстом одним сообщением):"
+    )
 
 @admin_only
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4418,6 +4518,7 @@ def configure_application(app):
     app.add_handler(CallbackQueryHandler(order_confirmation, pattern="^order_confirm_"))
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
+    app.add_handler(CallbackQueryHandler(owner_withdraw_callback, pattern="^owner_withdraw$"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
     app.add_handler(CommandHandler("start", start_over))
     app.add_handler(CommandHandler("stats", stats))
@@ -4431,6 +4532,35 @@ def configure_application(app):
     async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
         user_id = update.effective_user.id
+
+        if context.user_data.get("awaiting_withdraw_details"):
+            payload = context.user_data.pop("awaiting_withdraw_details")
+            bot_ids = payload.get("bot_ids") or []
+            amount = float(payload.get("amount") or 0)
+            username = update.effective_user.username
+            username_label = f"@{username}" if username else "не указан"
+
+            message = (
+                "💸 <b>Запрос на вывод средств</b>\n\n"
+                f"👤 Пользователь: {username_label}\n"
+                f"🆔 TG ID: {user_id}\n"
+                f"💰 Сумма к выводу: {amount:.2f} ₽\n"
+                f"💳 Реквизиты: {text.strip()}"
+            )
+            for admin_id in ADMIN_IDS:
+                try:
+                    await primary_bot.send_message(admin_id, message, parse_mode="HTML")
+                except Exception as e:
+                    logger.warning("Не удалось отправить запрос на вывод администратору %s: %s", admin_id, e)
+
+            for bot_id in bot_ids:
+                if bot_id:
+                    reset_bot_reward(bot_id)
+
+            await update.message.reply_text(
+                "✅ Запрос на вывод отправлен администратору. Баланс обнулён."
+            )
+            return
 
         if context.user_data.get("awaiting_city"):
             city = text.strip()
