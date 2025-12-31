@@ -11,7 +11,9 @@ import json
 import re
 import warnings
 import shutil
-from datetime import datetime
+from io import BytesIO
+from collections import deque
+from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
 
@@ -62,9 +64,9 @@ SECONDARY_DB_PATH = Path(
 
 PODMENA_DB_PATH = DB_DIR / "podmena.db"
 
-TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
-SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
-SBP_BANK_INFO = (os.getenv("SBP_BANK_INFO") or locals().get("SBP_BANK_INFO") or "❄️ Банк ВТБ").strip()
+TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2204311302071452").strip()
+SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79236767536").strip()
+SBP_BANK_INFO = (os.getenv("SBP_BANK_INFO") or locals().get("SBP_BANK_INFO") or "Яндекс Банк").strip()
 LTC_WALLET = (
     os.getenv("LTC_WALLET")
     or locals().get("LTC_WALLET")
@@ -165,6 +167,62 @@ def get_order_bot(order: dict | None) -> Bot:
         token = order.get("bot_token") or PRIMARY_BOT_TOKEN
     return get_bot_client(token)
 
+
+def collect_database_files() -> list[Path]:
+    candidates = [
+        DB_PATH,
+        SECONDARY_DB_PATH,
+        PODMENA_DB_PATH,
+        DB_DIR,
+    ]
+    db_files: dict[Path, Path] = {}
+    for entry in candidates:
+        if isinstance(entry, Path) and entry.is_dir():
+            for item in entry.glob("*.db"):
+                db_files[item.resolve()] = item
+        elif isinstance(entry, Path):
+            db_files[entry.resolve()] = entry
+    return list(db_files.values())
+
+
+def tail_text_lines(path: Path, limit: int) -> str:
+    if not path.exists():
+        return ""
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+        lines = deque(handle, maxlen=limit)
+    return "".join(lines)
+
+
+async def send_databases_and_logs(bot: Bot, chat_id: int, log_lines: int, title: str):
+    db_files = collect_database_files()
+    lines = [title]
+    if not db_files:
+        lines.append("⚠️ Базы данных не найдены.")
+    else:
+        lines.append("📦 Базы данных:")
+        for db_file in db_files:
+            lines.append(f"• {db_file.name}")
+
+    log_path = Path("bot.log")
+    log_text = tail_text_lines(log_path, log_lines)
+    if log_text:
+        lines.append(f"🧾 Лог: последние {log_lines} строк.")
+    else:
+        lines.append("⚠️ Лог не найден или пуст.")
+
+    await bot.send_message(chat_id, "\n".join(lines))
+
+    for db_file in db_files:
+        if db_file.exists():
+            await bot.send_document(
+                chat_id=chat_id,
+                document=InputFile(db_file.open("rb"), filename=db_file.name),
+            )
+
+    log_payload = log_text or "Лог пуст или не найден."
+    log_bytes = BytesIO(log_payload.encode("utf-8"))
+    log_bytes.name = "bot_log.txt"
+    await bot.send_document(chat_id=chat_id, document=InputFile(log_bytes, filename="bot_log.txt"))
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(DB_DIR, exist_ok=True)
 
@@ -1631,6 +1689,18 @@ def payment_choice_keyboard(order_id):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎁 Отправить способы оплаты", callback_data=f"pay_card_{order_id}")],
     ])
+
+
+def admin_reply_keyboard(order_id: int):
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Ответить", callback_data=f"reply_client_{order_id}")]]
+    )
+
+
+def client_reply_keyboard(order_id: int):
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Ответить", callback_data=f"reply_admin_{order_id}")]]
+    )
 
 
 def admin_panel_keyboard():
@@ -3523,6 +3593,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("found_"):
         order_id = int(data.split("_")[1])
         context.user_data['order_id'] = order_id
+        context.user_data["admin_message_mode"] = "found"
         order = get_order(order_id)
         if not order:
             await query.answer("Заказ не найден", show_alert=True)
@@ -3544,6 +3615,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("chat_"):
         order_id = int(data.split("_")[1])
         context.user_data['order_id'] = order_id
+        context.user_data["admin_message_mode"] = "chat"
+        await query.message.reply_text("Введите сообщение пользователю:")
+        return WAIT_ADMIN_MESSAGE
+    elif data.startswith("reply_admin_"):
+        order_id = int(data.split("_")[2])
+        context.user_data["order_id"] = order_id
+        context.user_data["admin_message_mode"] = "reply"
         await query.message.reply_text("Введите сообщение пользователю:")
         return WAIT_ADMIN_MESSAGE
     elif data.startswith("pay_card_"):
@@ -3676,18 +3754,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("\n".join(lines), reply_markup=admin_panel_keyboard())
         return ConversationHandler.END
     elif data == "admin_dump_db":
-        db_file = Path(DB_PATH)
-        if not db_file.exists():
-            await query.message.reply_text("База данных не найдена", reply_markup=admin_panel_keyboard())
-            return ConversationHandler.END
         try:
-            await query.message.reply_document(
-                document=InputFile(db_file.open("rb"), filename=db_file.name),
-                caption="Актуальная база данных",
+            await send_databases_and_logs(
+                bot=context.bot,
+                chat_id=query.from_user.id,
+                log_lines=150,
+                title="📦 Выгрузка баз данных и логов",
             )
         except Exception as e:
-            logger.error("Не удалось отправить БД: %s", e)
-            await query.message.reply_text("Не удалось отправить БД", reply_markup=admin_panel_keyboard())
+            logger.error("Не удалось отправить БД и логи: %s", e)
+            await query.message.reply_text("Не удалось отправить БД и логи", reply_markup=admin_panel_keyboard())
         return ConversationHandler.END
     elif data == "admin_restart_bots":
         await query.message.reply_text("Перезапускаю всех ботов...", reply_markup=admin_panel_keyboard())
@@ -3814,15 +3890,38 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     order_id = context.user_data.get('order_id')
+    message_mode = context.user_data.pop("admin_message_mode", "found")
     order = get_order(order_id)
     if not order:
         await update.message.reply_text("Заказ не найден.", reply_markup=admin_panel_keyboard())
         return ConversationHandler.END
     order_bot = get_order_bot(order)
     tg_id = order.get("tg_id")
-    await order_bot.send_message(tg_id, f"🔔 Сообщение от администратора:\n{text}")
+    reply_markup = None
+    if message_mode in {"chat", "reply"}:
+        reply_markup = admin_reply_keyboard(order_id)
+    await order_bot.send_message(
+        tg_id,
+        f"🔔 Сообщение от администратора:\n{text}",
+        reply_markup=reply_markup,
+    )
+    if message_mode in {"chat", "reply"}:
+        await update.message.reply_text("Сообщение отправлено.")
+        return ConversationHandler.END
     await update.message.reply_text("Сообщение отправлено. Теперь введите сумму заказа (₽):")
     return WAIT_ADMIN_SUM
+
+
+async def reply_client_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    order_id = int(query.data.split("_")[2])
+    order = get_order(order_id)
+    if not order or order.get("tg_id") != query.from_user.id:
+        await query.message.reply_text("Заказ не найден или доступ запрещён.")
+        return
+    context.user_data["reply_to_admin_order_id"] = order_id
+    await query.message.reply_text("Напишите ответ администратору:")
 
 
 async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4480,7 +4579,7 @@ def configure_application(app):
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|reply_admin_|admin_orders|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
@@ -4515,6 +4614,7 @@ def configure_application(app):
     app.add_handler(conv_handler)
     app.add_handler(admin_conv_handler)
     app.add_handler(payment_conv)
+    app.add_handler(CallbackQueryHandler(reply_client_callback, pattern="^reply_client_"))
     app.add_handler(CallbackQueryHandler(order_confirmation, pattern="^order_confirm_"))
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
@@ -4560,6 +4660,28 @@ def configure_application(app):
             await update.message.reply_text(
                 "✅ Запрос на вывод отправлен администратору. Баланс обнулён."
             )
+            return
+
+        if context.user_data.get("reply_to_admin_order_id"):
+            order_id = context.user_data.pop("reply_to_admin_order_id")
+            order = get_order(order_id)
+            if not order or order.get("tg_id") != user_id:
+                await update.message.reply_text("Заказ не найден или доступ запрещён.")
+                return
+            username = update.effective_user.username
+            username_label = f"@{username}" if username else "не указан"
+            message = (
+                f"📩 Ответ от клиента по заказу №{order_id}\n"
+                f"👤 Пользователь: {username_label} (ID: {user_id})\n"
+                f"Сообщение:\n{text}"
+            )
+            keyboard = client_reply_keyboard(order_id)
+            for admin_id in ADMIN_IDS:
+                try:
+                    await primary_bot.send_message(admin_id, message, reply_markup=keyboard)
+                except Exception as e:
+                    logger.warning("Не удалось отправить ответ администратору %s: %s", admin_id, e)
+            await update.message.reply_text("✅ Сообщение отправлено администратору.")
             return
 
         if context.user_data.get("awaiting_city"):
@@ -4736,6 +4858,26 @@ async def stop_bot(token: str):
         logger.info(f"Бот {token} остановлен и удалён из списка")
 
 
+async def daily_admin_backup_scheduler():
+    while True:
+        now = datetime.now()
+        target = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target = target + timedelta(days=1)
+        wait_seconds = (target - now).total_seconds()
+        await asyncio.sleep(wait_seconds)
+        for admin_id in ADMIN_IDS:
+            try:
+                await send_databases_and_logs(
+                    bot=primary_bot,
+                    chat_id=admin_id,
+                    log_lines=200,
+                    title="🗓️ Ежедневный отчёт: базы данных и логи",
+                )
+            except Exception as e:
+                logger.error("Не удалось отправить ежедневный отчёт админу %s: %s", admin_id, e)
+
+
 async def restart_all_bots():
     tokens = {PRIMARY_BOT_TOKEN}
     if TOKEN:
@@ -4758,6 +4900,7 @@ async def main_async():
     init_db()
     init_podmena_db()
     add_user_bot(0, PRIMARY_BOT_TOKEN, DB_PATH, "Основной бот")
+    asyncio.create_task(daily_admin_backup_scheduler())
     tokens = {PRIMARY_BOT_TOKEN}
     if TOKEN:
         tokens.add(TOKEN)
