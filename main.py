@@ -296,7 +296,7 @@ def init_db(db_path=DB_PATH):
                 username TEXT,
                 balance REAL DEFAULT 0.00,
                 orders_count INTEGER DEFAULT 0,
-                coefficient REAL DEFAULT 0.55,
+                coefficient REAL DEFAULT 0.45,
                 city TEXT,
                 referral_code TEXT,
                 referred_by INTEGER,
@@ -2334,7 +2334,7 @@ async def price_tariff_selected(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return ConversationHandler.END
 
-    our_price = round(price_value * 0.55, 2)
+    our_price = round(price_value * 0.45, 2)
     data["app_price"] = price_value
     data["our_price"] = our_price
     data["price_class"] = price_class
@@ -2888,7 +2888,7 @@ async def ensure_text_order_price(order_data: dict) -> None:
     if price_value is None:
         return
 
-    our_price = round(price_value * 0.55, 2)
+    our_price = round(price_value * 0.45, 2)
     order_data["price_key"] = price_key
     order_data["app_price"] = price_value
     order_data["our_price"] = our_price
@@ -4226,7 +4226,7 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order = get_order(order_id)
     tg_id = order.get("tg_id")
     user = get_user(tg_id)
-    coefficient = user["coefficient"] if user else 1
+    coefficient = user["coefficient"] if user and user.get("coefficient") is not None else 0.45
     total = round(amount * coefficient, 2)
 
     update_order_fields(order_id, status="car_found", amount=total, base_amount=amount)
