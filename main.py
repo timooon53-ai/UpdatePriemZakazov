@@ -175,6 +175,10 @@ def collect_database_files() -> list[Path]:
         PODMENA_DB_PATH,
         DB_DIR,
     ]
+    for bot in list_all_bots():
+        db_path = bot.get("db_path")
+        if db_path:
+            candidates.append(Path(db_path))
     db_files: dict[Path, Path] = {}
     for entry in candidates:
         if isinstance(entry, Path) and entry.is_dir():
@@ -400,6 +404,9 @@ def init_db(db_path=DB_PATH):
         c.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('ordering_enabled', '1')"
         )
+        c.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('order_coefficient', '0.45')"
+        )
 
         c.execute(
             """
@@ -507,6 +514,23 @@ def set_setting(key, value, db_path=DB_PATH):
 
 def is_ordering_enabled():
     return get_setting("ordering_enabled", "1") == "1"
+
+
+def get_order_coefficient() -> float:
+    raw_value = get_setting("order_coefficient", "0.45")
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        value = 0.45
+    return value if value > 0 else 0.45
+
+
+def calculate_client_total(base_amount: float, coefficient: float, paid_orders_count: int) -> float:
+    if paid_orders_count % 10 == 9:
+        free_limit = 1300
+        excess = max(0.0, base_amount - free_limit)
+        return round(excess * coefficient, 2)
+    return round(base_amount * coefficient, 2)
 
 # ==========================
 # Работа с пользователями
@@ -1707,6 +1731,7 @@ def admin_panel_keyboard():
     ordering_enabled = is_ordering_enabled()
     ordering_label = "⛄️ Остановить приём заказов" if ordering_enabled else "🎄 Включить приём заказов"
     status_text = "🎉 Заказы включены" if ordering_enabled else "🧊 Заказы выключены"
+    coefficient = get_order_coefficient()
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎁 Заказы пользователя", callback_data="admin_orders")],
         [InlineKeyboardButton("🔔 Обновить информацию", callback_data="admin_refresh")],
@@ -1718,6 +1743,7 @@ def admin_panel_keyboard():
         [InlineKeyboardButton("🔄 Перезапуск ботов", callback_data="admin_restart_bots")],
         [InlineKeyboardButton("🔔 Заказы для подмены", callback_data="admin_replacements")],
         [InlineKeyboardButton("🧹 Очистить подмены", callback_data="admin_podmena_clear")],
+        [InlineKeyboardButton(f"⚙️ Коэффициент ({coefficient:.2f})", callback_data="admin_coefficient")],
         [InlineKeyboardButton(ordering_label, callback_data="admin_toggle")],
         [InlineKeyboardButton(status_text, callback_data="admin_status")],
     ])
@@ -1847,7 +1873,7 @@ async def send_profile_info(target, user_id, context):
 
     username = user["username"]
     orders_count = user["orders_count"]
-    coefficient = user["coefficient"]
+    coefficient = get_order_coefficient()
     city = user["city"]
     user_bots = list_user_bots(user_id)
     referral_code = ensure_referral_code(user_id)
@@ -1893,7 +1919,8 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. Для заказа такси нажмите «Заказать такси 🛷».\n"
         "2. Вы можете отправить заказ скриншотом или текстом.\n"
         "3. Статус заказа отслеживается через уведомления.\n"
-        "4. При проблемах — пишите @TakeMaxist"
+        "4. Каждая 10 поездка до 1300 ₽ — бесплатно.\n"
+        "5. При проблемах — пишите @TakeMaxist"
     )
     await update.message.reply_text(text, reply_markup=back_keyboard())
 
@@ -1921,7 +1948,10 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return await price_check_start(update, context)
     if text == FAQ_BTN:
         await update.message.reply_text(
-            "Откройте ответы на частые вопросы:", reply_markup=faq_keyboard()
+            "Откройте ответы на частые вопросы:\n"
+            "🎁 Каждая 10 поездка до 1300 ₽ — бесплатно.\n"
+            "Если сумма выше 1300 ₽, коэффициент применяется только к разнице.",
+            reply_markup=faq_keyboard(),
         )
         return ConversationHandler.END
     if text == ADMIN_BTN:
@@ -2176,7 +2206,6 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
         f"К оплате за заказ №{order_id}: {amount:.2f} ₽"
     )
     await build_and_send_payment(query.from_user.id, method, amount, context, query.message, type_="order", order_id=order_id)
-    await notify_admins_reward(order)
     return ConversationHandler.END
 
 
@@ -2208,7 +2237,8 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_ADMIN_BROADCAST,
     WAIT_PAYMENT_PROOF,
     WAIT_BOT_BALANCE,
-) = range(24)
+    WAIT_ADMIN_COEFFICIENT,
+) = range(25)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -2334,7 +2364,8 @@ async def price_tariff_selected(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return ConversationHandler.END
 
-    our_price = round(price_value * 0.45, 2)
+    coefficient = get_order_coefficient()
+    our_price = round(price_value * coefficient, 2)
     data["app_price"] = price_value
     data["our_price"] = our_price
     data["price_class"] = price_class
@@ -2888,7 +2919,8 @@ async def ensure_text_order_price(order_data: dict) -> None:
     if price_value is None:
         return
 
-    our_price = round(price_value * 0.45, 2)
+    coefficient = get_order_coefficient()
+    our_price = round(price_value * coefficient, 2)
     order_data["price_key"] = price_key
     order_data["app_price"] = price_value
     order_data["our_price"] = our_price
@@ -3200,7 +3232,6 @@ async def order_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             comment=comment,
         )
 
-    increment_orders_count(query.from_user.id)
     await query.message.reply_text(
         f"🎉 Ваш заказ №{order_id} создан",
         reply_markup=main_menu_keyboard(query.from_user.id),
@@ -3765,6 +3796,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error("Не удалось отправить БД и логи: %s", e)
             await query.message.reply_text("Не удалось отправить БД и логи", reply_markup=admin_panel_keyboard())
         return ConversationHandler.END
+    elif data == "admin_coefficient":
+        coefficient = get_order_coefficient()
+        await query.message.reply_text(
+            f"Текущий коэффициент: {coefficient:.2f}\n"
+            "Введите новый коэффициент (например 0.45):"
+        )
+        return WAIT_ADMIN_COEFFICIENT
     elif data == "admin_restart_bots":
         await query.message.reply_text("Перезапускаю всех ботов...", reply_markup=admin_panel_keyboard())
         await restart_all_bots()
@@ -3850,6 +3888,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not payment:
             await query.message.reply_text("Платёж не найден")
             return ConversationHandler.END
+        if payment.get("status") == "success":
+            await query.message.reply_text("Оплата уже подтверждена")
+            return ConversationHandler.END
         user_id = payment.get("tg_id")
         order_id = payment.get("order_id")
         order = get_order(order_id) if order_id else None
@@ -3858,6 +3899,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update_order_status(order_id, "paid")
         update_payment(payment_id, status="success")
         await order_bot.send_message(user_id, "🎉 Оплата за поездку подтверждена! Спасибо!")
+        if order_id:
+            increment_orders_count(user_id)
+            if order:
+                await notify_admins_reward(order)
         await query.message.reply_text("Оплата отмечена как успешная")
         return ConversationHandler.END
     elif data.startswith("paydecline_"):
@@ -3922,6 +3967,23 @@ async def reply_client_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     context.user_data["reply_to_admin_order_id"] = order_id
     await query.message.reply_text("Напишите ответ администратору:")
+
+
+async def admin_update_coefficient(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_value = update.message.text.replace(" ", "").replace(",", ".")
+    try:
+        value = float(raw_value)
+        if value <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("🎄🚫 Некорректное значение. Введите число больше 0.")
+        return WAIT_ADMIN_COEFFICIENT
+    set_setting("order_coefficient", f"{value:.4f}")
+    await update.message.reply_text(
+        f"✅ Коэффициент обновлён: {value:.4f}",
+        reply_markup=admin_panel_keyboard(),
+    )
+    return ConversationHandler.END
 
 
 async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4226,15 +4288,31 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order = get_order(order_id)
     tg_id = order.get("tg_id")
     user = get_user(tg_id)
-    coefficient = user["coefficient"] if user and user.get("coefficient") is not None else 0.45
-    total = round(amount * coefficient, 2)
+    coefficient = get_order_coefficient()
+    paid_orders_count = int((user or {}).get("orders_count") or 0)
+    is_bonus_order = paid_orders_count % 10 == 9
+    total = calculate_client_total(amount, coefficient, paid_orders_count)
 
     update_order_fields(order_id, status="car_found", amount=total, base_amount=amount)
 
     updated_order = dict(order or {})
     updated_order.update({"id": order_id, "amount": total, "base_amount": amount})
     order_bot = get_order_bot(order)
-    await send_payment_menu(updated_order, order_bot)
+    if total <= 0:
+        update_order_status(order_id, "paid")
+        increment_orders_count(tg_id)
+        await order_bot.send_message(
+            tg_id,
+            "🎉 Ваша 10 поездка до 1300 ₽ — бесплатно. Оплата не требуется!",
+        )
+        await notify_admins_reward(updated_order)
+    else:
+        if is_bonus_order:
+            await order_bot.send_message(
+                tg_id,
+                "🎁 10 поездка: 1300 ₽ бесплатно. Оплата считается только за разницу.",
+            )
+        await send_payment_menu(updated_order, order_bot)
 
     referral_reward = 0
     referrer_id = (user or {}).get("referred_by")
@@ -4274,10 +4352,15 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Не удалось уведомить владельца бота о заказе {order_id}: {e}")
 
-    await update.message.reply_text(
-        f"🎉 Сумма заказа сохранена. Итог для клиента: {total:.2f} ₽. Меню оплаты отправлено клиенту",
-        reply_markup=payment_choice_keyboard(order_id),
-    )
+    if total <= 0:
+        await update.message.reply_text(
+            "🎉 Сумма заказа сохранена. Для клиента поездка бесплатна (до 1300 ₽)."
+        )
+    else:
+        await update.message.reply_text(
+            f"🎉 Сумма заказа сохранена. Итог для клиента: {total:.2f} ₽. Меню оплаты отправлено клиенту",
+            reply_markup=payment_choice_keyboard(order_id),
+        )
 
     await update.message.reply_text(
         "Добавить заказ для подмены?",
@@ -4579,7 +4662,7 @@ def configure_application(app):
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|reply_admin_|admin_orders|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|reply_admin_|admin_orders|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|admin_coefficient|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
@@ -4592,6 +4675,7 @@ def configure_application(app):
             ],
             WAIT_REPLACEMENT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_replacement_save)],
             WAIT_BOT_BALANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_bot_balance_update)],
+            WAIT_ADMIN_COEFFICIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_update_coefficient)],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
@@ -4619,7 +4703,7 @@ def configure_application(app):
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(owner_withdraw_callback, pattern="^owner_withdraw$"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|admin_coefficient|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
     app.add_handler(CommandHandler("start", start_over))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("ban", ban_user))
@@ -4748,7 +4832,10 @@ def configure_application(app):
             await order_menu(update, context)
         elif text == FAQ_BTN:
             await update.message.reply_text(
-                "Откройте ответы на частые вопросы:", reply_markup=faq_keyboard()
+                "Откройте ответы на частые вопросы:\n"
+                "🎁 Каждая 10 поездка до 1300 ₽ — бесплатно.\n"
+                "Если сумма выше 1300 ₽, коэффициент применяется только к разнице.",
+                reply_markup=faq_keyboard(),
             )
         elif text == BACK_BTN:
             await update.message.reply_text(
