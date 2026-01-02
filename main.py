@@ -304,7 +304,8 @@ def init_db(db_path=DB_PATH):
                 city TEXT,
                 referral_code TEXT,
                 referred_by INTEGER,
-                referral_balance REAL DEFAULT 0.00
+                referral_balance REAL DEFAULT 0.00,
+                discount_amount REAL DEFAULT 0.00
             )
         """)
 
@@ -317,6 +318,8 @@ def init_db(db_path=DB_PATH):
             c.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
         if "referral_balance" not in existing_columns:
             c.execute("ALTER TABLE users ADD COLUMN referral_balance REAL DEFAULT 0.00")
+        if "discount_amount" not in existing_columns:
+            c.execute("ALTER TABLE users ADD COLUMN discount_amount REAL DEFAULT 0.00")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_referral_code ON users(referral_code)")
 
         c.execute("""
@@ -753,6 +756,21 @@ def get_all_user_ids(db_path: str = USERS_DB):
         c = conn.cursor()
         c.execute("SELECT tg_id FROM users")
         return [row[0] for row in c.fetchall()]
+
+
+def get_user_discount(tg_id: int) -> float:
+    with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("SELECT discount_amount FROM users WHERE tg_id=?", (tg_id,))
+        row = c.fetchone()
+        return float(row[0] or 0) if row else 0.0
+
+
+def set_user_discount(tg_id: int, amount: float):
+    with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET discount_amount = ? WHERE tg_id=?", (amount, tg_id))
+        conn.commit()
 
 
 def count_bot_users(bot_token: str) -> int:
@@ -1744,6 +1762,7 @@ def admin_panel_keyboard():
         [InlineKeyboardButton("🔔 Заказы для подмены", callback_data="admin_replacements")],
         [InlineKeyboardButton("🧹 Очистить подмены", callback_data="admin_podmena_clear")],
         [InlineKeyboardButton(f"⚙️ Коэффициент ({coefficient:.2f})", callback_data="admin_coefficient")],
+        [InlineKeyboardButton("🎁 Скидка клиенту", callback_data="admin_discount")],
         [InlineKeyboardButton(ordering_label, callback_data="admin_toggle")],
         [InlineKeyboardButton(status_text, callback_data="admin_status")],
     ])
@@ -1838,21 +1857,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.effective_message
     if target:
         await target.reply_text(
-            f"🎄 Привет, @{user.username or 'не указан'}! Добро пожаловать в сказочный сервис заказа такси 🎆🛷",
+            f"🎄 Привет, @{user.username or 'не указан'}! Добро пожаловать в сказочный сервис заказа такси 🎆🛷\n"
+            "🎁 Каждая 10 поездка до 1300 ₽ — бесплатно.",
             reply_markup=start_links_keyboard(),
         )
         await target.reply_text(
-            "🎉 С наступающим Новым годом! 🎁", reply_markup=main_menu_keyboard(user.id)
+            "✨ С наступающим Новым годом! 🎉", reply_markup=main_menu_keyboard(user.id)
         )
     else:
         await context.bot.send_message(
             chat_id=user.id,
-            text=f"🎄 Привет, @{user.username or 'не указан'}! Добро пожаловать в сказочный сервис заказа такси 🎆🛷",
+            text=(
+                f"🎄 Привет, @{user.username or 'не указан'}! Добро пожаловать в сказочный сервис заказа такси 🎆🛷\n"
+                "🎁 Каждая 10 поездка до 1300 ₽ — бесплатно."
+            ),
             reply_markup=start_links_keyboard(),
         )
         await context.bot.send_message(
             chat_id=user.id,
-            text="🎉 С наступающим Новым годом! 🎁",
+            text="✨ С наступающим Новым годом! 🎉",
             reply_markup=main_menu_keyboard(user.id),
         )
 
@@ -1879,6 +1902,7 @@ async def send_profile_info(target, user_id, context):
     referral_code = ensure_referral_code(user_id)
     referral_link = build_referral_link(referral_code)
     referral_balance = float(user.get("referral_balance") or 0)
+    discount_amount = float(user.get("discount_amount") or 0)
     referrer_id = user.get("referred_by")
     referrer = get_user(referrer_id) if referrer_id else None
     referrer_label = f"@{referrer.get('username')}" if referrer and referrer.get("username") else (str(referrer_id) if referrer_id else "—")
@@ -1895,6 +1919,7 @@ async def send_profile_info(target, user_id, context):
         f"Коэффициент: {coefficient:.2f}\n"
         f"Город: {city or 'не указан'}\n"
         f"Реферальный счёт: {referral_balance:.2f} ₽\n"
+        f"Скидка на следующую поездку: {discount_amount:.2f} ₽\n"
         f"Ваш ref-код: {referral_code}\n"
         f"Реферальная ссылка: {referral_link}\n"
         f"Приглашено друзей: {referral_count}\n"
@@ -2238,7 +2263,9 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_PAYMENT_PROOF,
     WAIT_BOT_BALANCE,
     WAIT_ADMIN_COEFFICIENT,
-) = range(25)
+    WAIT_ADMIN_DISCOUNT_USER,
+    WAIT_ADMIN_DISCOUNT_AMOUNT,
+) = range(27)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -3803,6 +3830,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Введите новый коэффициент (например 0.45):"
         )
         return WAIT_ADMIN_COEFFICIENT
+    elif data == "admin_discount":
+        await query.message.reply_text("Введите Telegram ID клиента для скидки:")
+        return WAIT_ADMIN_DISCOUNT_USER
     elif data == "admin_restart_bots":
         await query.message.reply_text("Перезапускаю всех ботов...", reply_markup=admin_panel_keyboard())
         await restart_all_bots()
@@ -3981,6 +4011,48 @@ async def admin_update_coefficient(update: Update, context: ContextTypes.DEFAULT
     set_setting("order_coefficient", f"{value:.4f}")
     await update.message.reply_text(
         f"✅ Коэффициент обновлён: {value:.4f}",
+        reply_markup=admin_panel_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def admin_discount_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_value = update.message.text.strip()
+    if not raw_value.isdigit():
+        await update.message.reply_text("🎄🚫 Некорректный Telegram ID, попробуйте снова.")
+        return WAIT_ADMIN_DISCOUNT_USER
+    tg_id = int(raw_value)
+    if not get_user(tg_id):
+        await update.message.reply_text("Пользователь не найден. Проверьте ID.")
+        return WAIT_ADMIN_DISCOUNT_USER
+    context.user_data["discount_user_id"] = tg_id
+    await update.message.reply_text("Введите сумму скидки в рублях:")
+    return WAIT_ADMIN_DISCOUNT_AMOUNT
+
+
+async def admin_discount_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_value = update.message.text.replace(" ", "").replace(",", ".")
+    try:
+        amount = float(raw_value)
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("🎄🚫 Некорректная сумма, введите число больше 0.")
+        return WAIT_ADMIN_DISCOUNT_AMOUNT
+    tg_id = context.user_data.pop("discount_user_id", None)
+    if not tg_id:
+        await update.message.reply_text("Ошибка: пользователь не найден.")
+        return ConversationHandler.END
+    set_user_discount(tg_id, amount)
+    try:
+        await primary_bot.send_message(
+            tg_id,
+            f"🎁 Вам начислена скидка {amount:.2f} ₽ на следующую поездку!",
+        )
+    except Exception as e:
+        logger.warning("Не удалось уведомить пользователя %s о скидке: %s", tg_id, e)
+    await update.message.reply_text(
+        f"✅ Скидка {amount:.2f} ₽ установлена для клиента {tg_id}.",
         reply_markup=admin_panel_keyboard(),
     )
     return ConversationHandler.END
@@ -4292,6 +4364,12 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
     paid_orders_count = int((user or {}).get("orders_count") or 0)
     is_bonus_order = paid_orders_count % 10 == 9
     total = calculate_client_total(amount, coefficient, paid_orders_count)
+    discount_amount = get_user_discount(tg_id)
+    applied_discount = 0.0
+    if total > 0 and discount_amount > 0:
+        applied_discount = min(total, discount_amount)
+        total = round(total - applied_discount, 2)
+        set_user_discount(tg_id, 0.0)
 
     update_order_fields(order_id, status="car_found", amount=total, base_amount=amount)
 
@@ -4311,6 +4389,14 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await order_bot.send_message(
                 tg_id,
                 "🎁 10 поездка: 1300 ₽ бесплатно. Оплата считается только за разницу.",
+            )
+        if applied_discount > 0:
+            await order_bot.send_message(
+                tg_id,
+                f"🎁 Применена скидка {applied_discount:.2f} ₽. Итог к оплате: {total:.2f} ₽.",
+            )
+            await update.message.reply_text(
+                f"🎁 Скидка клиента применена: {applied_discount:.2f} ₽."
             )
         await send_payment_menu(updated_order, order_bot)
 
@@ -4662,7 +4748,7 @@ def configure_application(app):
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|reply_admin_|admin_orders|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|admin_coefficient|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|reply_admin_|admin_orders|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|admin_coefficient|admin_discount|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
@@ -4676,6 +4762,8 @@ def configure_application(app):
             WAIT_REPLACEMENT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_replacement_save)],
             WAIT_BOT_BALANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_bot_balance_update)],
             WAIT_ADMIN_COEFFICIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_update_coefficient)],
+            WAIT_ADMIN_DISCOUNT_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_discount_user)],
+            WAIT_ADMIN_DISCOUNT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_discount_amount)],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
@@ -4703,7 +4791,7 @@ def configure_application(app):
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(owner_withdraw_callback, pattern="^owner_withdraw$"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|admin_coefficient|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|admin_coefficient|admin_discount|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
     app.add_handler(CommandHandler("start", start_over))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("ban", ban_user))
