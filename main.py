@@ -11,6 +11,7 @@ import json
 import re
 import warnings
 import shutil
+import string
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -45,6 +46,10 @@ PRIMARY_BOT_TOKEN = (
     locals().get("PRIMARY_BOT_TOKEN") or os.getenv("PRIMARY_BOT_TOKEN") or TOKEN
 )
 ADMIN_IDS = locals().get("ADMIN_IDS", [])
+ADMIN_OPERATOR_NAMES = {
+    7515876699: "Оператор Майк",
+    7846689040: "Оператор Джимми",
+}
 SCREENSHOTS_DIR = Path(
     os.getenv("SCREENSHOTS_DIR")
     or locals().get("SCREENSHOTS_DIR")
@@ -173,6 +178,28 @@ def current_timestamp():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def get_operator_name(user_id: int | None) -> str | None:
+    if not user_id:
+        return None
+    return ADMIN_OPERATOR_NAMES.get(user_id)
+
+
+def format_operator_label(user_id: int | None, username: str | None = None) -> str:
+    operator_name = get_operator_name(user_id)
+    username_label = f"@{username}" if username else None
+    if operator_name and username_label:
+        return f"{operator_name} ({username_label})"
+    if operator_name:
+        return f"{operator_name} (ID: {user_id})"
+    if username_label:
+        return username_label
+    return f"ID: {user_id}" if user_id else "не указан"
+
+
+def build_operator_signature(user_id: int | None, username: str | None = None) -> str:
+    return f"👤 {format_operator_label(user_id, username)}"
+
+
 CHANNEL_URL = (os.getenv("CHANNEL_URL") or DEFAULT_CHANNEL_URL).strip()
 OPERATOR_URL = (os.getenv("OPERATOR_URL") or DEFAULT_OPERATOR_URL).strip()
 CHAT_URL = (os.getenv("CHAT_URL") or DEFAULT_CHAT_URL).strip()
@@ -242,7 +269,9 @@ def init_db(db_path=DB_PATH):
                 city TEXT,
                 referral_code TEXT,
                 referred_by INTEGER,
-                referral_balance REAL DEFAULT 0.00
+                referral_balance REAL DEFAULT 0.00,
+                promo_code TEXT,
+                promo_discount REAL DEFAULT 0.00
             )
         """)
 
@@ -255,6 +284,10 @@ def init_db(db_path=DB_PATH):
             c.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
         if "referral_balance" not in existing_columns:
             c.execute("ALTER TABLE users ADD COLUMN referral_balance REAL DEFAULT 0.00")
+        if "promo_code" not in existing_columns:
+            c.execute("ALTER TABLE users ADD COLUMN promo_code TEXT")
+        if "promo_discount" not in existing_columns:
+            c.execute("ALTER TABLE users ADD COLUMN promo_discount REAL DEFAULT 0.00")
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_referral_code ON users(referral_code)")
 
         c.execute("""
@@ -276,6 +309,8 @@ def init_db(db_path=DB_PATH):
                 status TEXT DEFAULT 'pending',
                 amount REAL,
                 base_amount REAL,
+                promo_code TEXT,
+                promo_discount REAL DEFAULT 0.00,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP
             )
@@ -290,6 +325,8 @@ def init_db(db_path=DB_PATH):
             "wishes": "TEXT",
             "base_amount": "REAL",
             "bot_token": "TEXT",
+            "promo_code": "TEXT",
+            "promo_discount": "REAL DEFAULT 0.00",
         }
         for column, definition in new_columns.items():
             if column not in existing_columns:
@@ -386,6 +423,31 @@ def init_db(db_path=DB_PATH):
         )
         c.execute(
             "CREATE INDEX IF NOT EXISTS idx_referral_history_referrer ON referral_history(referrer_id)"
+        )
+
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code TEXT PRIMARY KEY,
+                discount REAL,
+                activations_total INTEGER,
+                activations_used INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promo_redemptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT,
+                tg_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        c.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_promo_redemptions_unique ON promo_redemptions(code, tg_id)"
         )
 
         c.execute(
@@ -506,6 +568,91 @@ def get_user(tg_id):
         c.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,))
         row = c.fetchone()
         return dict(row) if row else None
+
+
+def get_user_promo(tg_id: int) -> tuple[str | None, float]:
+    user = get_user(tg_id) or {}
+    return user.get("promo_code"), float(user.get("promo_discount") or 0)
+
+
+def set_user_promo(tg_id: int, code: str, discount: float):
+    with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE users SET promo_code=?, promo_discount=? WHERE tg_id=?",
+            (code, discount, tg_id),
+        )
+        conn.commit()
+
+
+def clear_user_promo(tg_id: int):
+    with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET promo_code=NULL, promo_discount=0 WHERE tg_id=?", (tg_id,))
+        conn.commit()
+
+
+def generate_promo_code(length: int = 8) -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    return "".join(random.choice(alphabet) for _ in range(length))
+
+
+def create_promo_code(discount: float, activations_total: int) -> str:
+    code = generate_promo_code()
+    with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        while True:
+            c.execute("SELECT 1 FROM promo_codes WHERE code=?", (code,))
+            if not c.fetchone():
+                break
+            code = generate_promo_code()
+        c.execute(
+            """
+            INSERT INTO promo_codes (code, discount, activations_total, activations_used)
+            VALUES (?, ?, ?, 0)
+            """,
+            (code, discount, activations_total),
+        )
+        conn.commit()
+    return code
+
+
+def redeem_promo_code(tg_id: int, code: str) -> tuple[bool, str, float]:
+    normalized = (code or "").strip().upper()
+    if not normalized:
+        return False, "🎄🚫 Пустой промокод.", 0.0
+
+    active_code, _ = get_user_promo(tg_id)
+    if active_code:
+        return False, f"🎁 У вас уже активирован промокод {active_code}.", 0.0
+
+    with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("SELECT discount, activations_total, activations_used FROM promo_codes WHERE code=?", (normalized,))
+        row = c.fetchone()
+        if not row:
+            return False, "🎄🚫 Промокод не найден.", 0.0
+        discount, total, used = row
+        if total is not None and used >= total:
+            return False, "❄️ Промокод уже закончился.", 0.0
+
+        c.execute("SELECT 1 FROM promo_redemptions WHERE code=? AND tg_id=?", (normalized, tg_id))
+        if c.fetchone():
+            return False, "❄️ Этот промокод уже использован вами.", 0.0
+
+        c.execute(
+            "INSERT INTO promo_redemptions (code, tg_id) VALUES (?, ?)",
+            (normalized, tg_id),
+        )
+        c.execute(
+            "UPDATE promo_codes SET activations_used=activations_used+1 WHERE code=?",
+            (normalized,),
+        )
+        conn.commit()
+
+    discount_value = float(discount or 0)
+    set_user_promo(tg_id, normalized, discount_value)
+    return True, f"🎉 Промокод {normalized} активирован. Скидка {discount_value:.2f} ₽ будет применена к следующему заказу.", discount_value
 
 
 def ensure_referral_code(tg_id: int) -> str:
@@ -1415,6 +1562,7 @@ def profile_keyboard(has_city: bool, has_favorites: bool):
     fav_row = [InlineKeyboardButton("❄️ Любимые адреса", callback_data="profile_fav_manage")]
     buttons.append(fav_row)
     buttons.append([InlineKeyboardButton("🎁 Реферальная программа", callback_data="profile_referral")])
+    buttons.append([InlineKeyboardButton("🎁 Ввести промокод", callback_data="profile_promo")])
     buttons.append([InlineKeyboardButton("🎄 Добавить своего бота", callback_data="profile_bots")])
     buttons.append([InlineKeyboardButton("🎄 В главное меню", callback_data="profile_back")])
     return InlineKeyboardMarkup(buttons)
@@ -1587,13 +1735,16 @@ async def send_payment_menu(order: dict, bot: Bot):
     order_id = order.get("id")
     base_amount = order.get("base_amount") or order.get("amount") or 0
     total = order.get("amount") or base_amount
+    promo_discount = float(order.get("promo_discount") or 0)
+    promo_code = order.get("promo_code")
     tg_id = order.get("tg_id")
 
     message = (
         "🧾🎄 Оплата поездки\n"
         f"🛷 Заказ №{order_id}\n"
         f"🎁 Стоимость: {base_amount:.2f} ₽\n"
-        f"К оплате: {total:.2f} ₽\n\n"
+        + (f"🎁 Скидка по промокоду {promo_code}: -{promo_discount:.2f} ₽\n" if promo_discount else "")
+        + f"К оплате: {total:.2f} ₽\n\n"
         "Выберите удобный способ оплаты:"
     )
 
@@ -1617,10 +1768,23 @@ def admin_in_progress_buttons(order_id):
 
 def admin_search_buttons(order_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Связаться с заказчиком 🔔", callback_data=f"chat_{order_id}")],
+        [
+            InlineKeyboardButton("Связаться с заказчиком 🔔", callback_data=f"chat_{order_id}"),
+            InlineKeyboardButton("Отправить фото 📷", callback_data=f"sendphoto_{order_id}"),
+        ],
         [InlineKeyboardButton("Нашлась машина 🛷", callback_data=f"found_{order_id}"),
          InlineKeyboardButton("Отменить поиск ❄️🚫", callback_data=f"cancelsearch_{order_id}")]
     ])
+
+
+def admin_cancel_reason_keyboard(order_id: int):
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Дешевый", callback_data=f"cancelreason_{order_id}_cheap")],
+            [InlineKeyboardButton("Никто не берет", callback_data=f"cancelreason_{order_id}_nocar")],
+            [InlineKeyboardButton("Техническая", callback_data=f"cancelreason_{order_id}_tech")],
+        ]
+    )
 
 
 async def edit_admin_message(query, text: str, reply_markup=None):
@@ -1640,6 +1804,7 @@ def admin_panel_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎁 Заказы пользователя", callback_data="admin_orders")],
         [InlineKeyboardButton("🔔 Обновить информацию", callback_data="admin_refresh")],
+        [InlineKeyboardButton("🎁 Выпуск промокодов", callback_data="admin_promo")],
         [InlineKeyboardButton("📡 Все боты", callback_data="admin_all_bots")],
         [InlineKeyboardButton("🗂️ БД франшизы", callback_data="admin_franchise_db")],
         [InlineKeyboardButton("🎺 Рассылка по всем", callback_data="admin_broadcast")],
@@ -2035,6 +2200,9 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(text, reply_markup=referral_keyboard())
     elif data == "profile_ref_back":
         await send_profile_info(query.message, user_id, context)
+    elif data == "profile_promo":
+        context.user_data["awaiting_promo"] = True
+        await query.message.reply_text("🎁 Введите промокод:")
     elif data == "profile_fav_manage":
         favorites = get_favorite_addresses(user_id)
         await query.message.reply_text(
@@ -2138,7 +2306,10 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_ADMIN_BROADCAST,
     WAIT_PAYMENT_PROOF,
     WAIT_BOT_BALANCE,
-) = range(24)
+    WAIT_PROMO_ACTIVATIONS,
+    WAIT_PROMO_DISCOUNT,
+    WAIT_ADMIN_PHOTO,
+) = range(27)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -3458,15 +3629,25 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_reply_markup(reply_markup=admin_in_progress_buttons(order_id))
 
         user_id = order.get("tg_id")
+        operator_label = format_operator_label(query.from_user.id, query.from_user.username)
         status_frames = [
-            "🚕 Уже взяли в работу ваш заказ",
-            "🛠️ Трудимся над вашим заказом",
-            "🚦 Скоро начнём поиск такси",
+            f"🚕 Уже взяли в работу ваш заказ\n{build_operator_signature(query.from_user.id, query.from_user.username)}",
+            f"🛠️ Трудимся над вашим заказом\n{build_operator_signature(query.from_user.id, query.from_user.username)}",
+            f"🚦 Скоро начнём поиск такси\n{build_operator_signature(query.from_user.id, query.from_user.username)}",
         ]
         status_message = await order_bot.send_message(user_id, status_frames[0])
         context.application.create_task(
             animate_status_message(status_message, status_frames)
         )
+
+        notify_text = f"🔔 Админ {operator_label} взял заказ №{order_id} в работу."
+        for admin_id in ADMIN_IDS:
+            if admin_id == query.from_user.id:
+                continue
+            try:
+                await primary_bot.send_message(admin_id, notify_text)
+            except Exception as e:
+                logger.error("Не удалось уведомить админа %s о взятии заказа: %s", admin_id, e)
 
         # удаляем сообщение у других админов
         for admin_id in ADMIN_IDS:
@@ -3506,19 +3687,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not order:
             await query.answer("Заказ не найден", show_alert=True)
             return ConversationHandler.END
-
-        order_bot = get_order_bot(order)
-
-        update_order_status(order_id, "cancelled")
-        await edit_admin_message(query, "Заказ отменён 🎄🚫")
-        user_id = order.get("tg_id")
-        await order_bot.send_message(user_id, f"Ваш заказ №{order_id} отменён ❄️")
-
-        for admin_id in ADMIN_IDS:
-            if admin_id != query.from_user.id:
-                await safe_delete_message(
-                    context.bot, chat_id=admin_id, message_id=query.message.message_id
-                )
+        await query.message.reply_text(
+            "Выберите причину отмены заказа:", reply_markup=admin_cancel_reason_keyboard(order_id)
+        )
     # Нашлась машина
     elif data.startswith("found_"):
         order_id = int(data.split("_")[1])
@@ -3529,10 +3700,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
         order_bot = get_order_bot(order)
         tg_id = order.get("tg_id")
+        operator_signature = build_operator_signature(query.from_user.id, query.from_user.username)
         found_frames = [
-            "✅ Машина успешно найдена",
-            "📨 Сейчас отправим вам ссылку на машину",
-            "🛣️ Машина едет к вам",
+            f"✅ Машина успешно найдена\n{operator_signature}",
+            f"📨 Сейчас отправим вам ссылку на машину\n{operator_signature}",
+            f"🛣️ Машина едет к вам\n{operator_signature}",
         ]
         found_message = await order_bot.send_message(tg_id, found_frames[0])
         context.application.create_task(
@@ -3546,6 +3718,50 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['order_id'] = order_id
         await query.message.reply_text("Введите сообщение пользователю:")
         return WAIT_ADMIN_MESSAGE
+    elif data.startswith("cancelreason_"):
+        parts = data.split("_")
+        order_id = int(parts[1])
+        reason_code = parts[2] if len(parts) > 2 else ""
+        order = get_order(order_id)
+        if not order:
+            await query.answer("Заказ не найден", show_alert=True)
+            return ConversationHandler.END
+
+        reason_map = {
+            "cheap": "цена не соответствует минимальной",
+            "nocar": "нет свободных машин",
+            "tech": "по техническим причинам",
+        }
+        reason_text = reason_map.get(reason_code, "по техническим причинам")
+
+        update_order_status(order_id, "cancelled")
+        await edit_admin_message(query, f"Заказ №{order_id} отменён ❄️")
+        order_bot = get_order_bot(order)
+        user_id = order.get("tg_id")
+        notification = f"Заказ №{order_id} удалён, так как {reason_text}."
+
+        try:
+            await order_bot.send_message(user_id, notification)
+        except Exception as e:
+            logger.error("Не удалось уведомить заказчика %s об отмене: %s", user_id, e)
+
+        for admin_id in ADMIN_IDS:
+            try:
+                await primary_bot.send_message(admin_id, notification)
+            except Exception as e:
+                logger.error("Не удалось уведомить админа %s об отмене: %s", admin_id, e)
+
+        for admin_id in ADMIN_IDS:
+            if admin_id != query.from_user.id:
+                await safe_delete_message(
+                    context.bot, chat_id=admin_id, message_id=query.message.message_id
+                )
+        return ConversationHandler.END
+    elif data.startswith("sendphoto_"):
+        order_id = int(data.split("_")[1])
+        context.user_data['order_id'] = order_id
+        await query.message.reply_text("📷 Пришлите фото для заказчика:")
+        return WAIT_ADMIN_PHOTO
     elif data.startswith("pay_card_"):
         order_id = int(data.split("_")[2])
         order = get_order(order_id)
@@ -3554,7 +3770,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
         order_bot = get_order_bot(order)
         await send_payment_menu(order, order_bot)
-        await query.message.reply_text("Меню оплаты отправлено клиенту")
+        promo_discount = float(order.get("promo_discount") or 0)
+        promo_code = order.get("promo_code")
+        discount_line = (
+            f" (скидка {promo_discount:.2f} ₽ по промокоду {promo_code})"
+            if promo_discount
+            else ""
+        )
+        await query.message.reply_text(f"Меню оплаты отправлено клиенту{discount_line}")
     elif data.startswith("replacement_offer_add_"):
         order_id = int(data.rsplit("_", 1)[1])
         info_id = create_order_info(order_id)
@@ -3624,6 +3847,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_refresh":
         await refresh_all_users(query.message, context)
         return ConversationHandler.END
+    elif data == "admin_promo":
+        await query.message.reply_text("🎁 Введите количество активаций промокода:")
+        return WAIT_PROMO_ACTIVATIONS
     elif data == "admin_all_bots":
         await query.message.reply_text(
             "📡 Подключённые боты по владельцам:", reply_markup=admins_bots_keyboard()
@@ -3820,9 +4046,32 @@ async def admin_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
     order_bot = get_order_bot(order)
     tg_id = order.get("tg_id")
-    await order_bot.send_message(tg_id, f"🔔 Сообщение от администратора:\n{text}")
+    operator_signature = build_operator_signature(update.effective_user.id, update.effective_user.username)
+    await order_bot.send_message(tg_id, f"🔔 Сообщение от администратора:\n{text}\n\n{operator_signature}")
     await update.message.reply_text("Сообщение отправлено. Теперь введите сумму заказа (₽):")
     return WAIT_ADMIN_SUM
+
+
+async def admin_send_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    order_id = context.user_data.get('order_id')
+    order = get_order(order_id)
+    if not order:
+        await update.message.reply_text("Заказ не найден.", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+
+    if not update.message.photo:
+        await update.message.reply_text("📷 Пришлите фото, чтобы отправить заказчику.")
+        return WAIT_ADMIN_PHOTO
+
+    order_bot = get_order_bot(order)
+    tg_id = order.get("tg_id")
+    operator_signature = build_operator_signature(update.effective_user.id, update.effective_user.username)
+    caption = update.message.caption or ""
+    message_caption = f"{caption}\n\n{operator_signature}".strip()
+    photo = update.message.photo[-1]
+    await order_bot.send_photo(tg_id, photo=photo.file_id, caption=message_caption)
+    await update.message.reply_text("Фото отправлено заказчику.")
+    return ConversationHandler.END
 
 
 async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4108,6 +4357,46 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def admin_promo_activations(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_value = update.message.text.strip()
+    try:
+        activations = int(raw_value)
+        if activations <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("🎄🚫 Введите количество активаций целым числом больше 0.")
+        return WAIT_PROMO_ACTIVATIONS
+
+    context.user_data["promo_activations"] = activations
+    await update.message.reply_text("🎁 Введите сумму скидки (₽):")
+    return WAIT_PROMO_DISCOUNT
+
+
+async def admin_promo_discount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_value = update.message.text.replace(" ", "").replace(",", ".")
+    try:
+        discount = float(raw_value)
+        if discount <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("🎄🚫 Введите сумму скидки числом больше 0.")
+        return WAIT_PROMO_DISCOUNT
+
+    activations = context.user_data.pop("promo_activations", None)
+    if not activations:
+        await update.message.reply_text("Не указано число активаций.", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+
+    code = create_promo_code(discount, activations)
+    await update.message.reply_text(
+        f"🎉 Промокод создан: {code}\n"
+        f"🎁 Скидка: {discount:.2f} ₽\n"
+        f"🔢 Активаций: {activations}",
+        reply_markup=admin_panel_keyboard(),
+    )
+    return ConversationHandler.END
+
+
 
 # Подтверждение суммы и списание баланса
 async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4129,13 +4418,33 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(tg_id)
     coefficient = user["coefficient"] if user else 1
     total = round(amount * coefficient, 2)
+    promo_code, promo_discount = get_user_promo(tg_id)
+    promo_discount = float(promo_discount or 0)
+    discounted_total = max(total - promo_discount, 0)
 
-    update_order_fields(order_id, status="car_found", amount=total, base_amount=amount)
+    update_order_fields(
+        order_id,
+        status="car_found",
+        amount=discounted_total,
+        base_amount=amount,
+        promo_code=promo_code,
+        promo_discount=promo_discount,
+    )
 
     updated_order = dict(order or {})
-    updated_order.update({"id": order_id, "amount": total, "base_amount": amount})
+    updated_order.update(
+        {
+            "id": order_id,
+            "amount": discounted_total,
+            "base_amount": amount,
+            "promo_code": promo_code,
+            "promo_discount": promo_discount,
+        }
+    )
     order_bot = get_order_bot(order)
     await send_payment_menu(updated_order, order_bot)
+    if promo_code:
+        clear_user_promo(tg_id)
 
     referral_reward = 0
     referrer_id = (user or {}).get("referred_by")
@@ -4176,7 +4485,11 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Не удалось уведомить владельца бота о заказе {order_id}: {e}")
 
     await update.message.reply_text(
-        f"🎉 Сумма заказа сохранена. Итог для клиента: {total:.2f} ₽. Меню оплаты отправлено клиенту",
+        (
+            f"🎉 Сумма заказа сохранена. Итог для клиента: {discounted_total:.2f} ₽."
+            + (f" Скидка по промокоду {promo_code}: -{promo_discount:.2f} ₽." if promo_code else "")
+            + " Меню оплаты отправлено клиенту"
+        ),
         reply_markup=payment_choice_keyboard(order_id),
     )
 
@@ -4480,7 +4793,7 @@ def configure_application(app):
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|admin_orders|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|sendphoto_|admin_orders|admin_refresh|admin_promo|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|cancelreason_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
@@ -4493,6 +4806,9 @@ def configure_application(app):
             ],
             WAIT_REPLACEMENT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_replacement_save)],
             WAIT_BOT_BALANCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_bot_balance_update)],
+            WAIT_PROMO_ACTIVATIONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_promo_activations)],
+            WAIT_PROMO_DISCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_promo_discount)],
+            WAIT_ADMIN_PHOTO: [MessageHandler(filters.PHOTO & ~filters.COMMAND, admin_send_photo)],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
@@ -4519,7 +4835,7 @@ def configure_application(app):
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(owner_withdraw_callback, pattern="^owner_withdraw$"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|cancelreason_|sendphoto_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_promo|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
     app.add_handler(CommandHandler("start", start_over))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("ban", ban_user))
@@ -4589,6 +4905,13 @@ def configure_application(app):
             create_bot_storage(token, user_id, title)
             await ensure_bot_running(token)
             await update.message.reply_text("🤖 Бот успешно подключён! ✨")
+            await send_profile_info(update.message, user_id, context)
+            return
+
+        if context.user_data.get("awaiting_promo"):
+            context.user_data.pop("awaiting_promo", None)
+            success, message, _ = redeem_promo_code(user_id, text.strip())
+            await update.message.reply_text(message)
             await send_profile_info(update.message, user_id, context)
             return
 
