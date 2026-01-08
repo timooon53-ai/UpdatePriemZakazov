@@ -69,7 +69,7 @@ PODMENA_DB_PATH = DB_DIR / "podmena.db"
 
 TRANSFER_DETAILS = (os.getenv("TRANSFER_DETAILS") or locals().get("TRANSFER_DETAILS") or "2200248021994636").strip()
 SBP_DETAILS = (os.getenv("SBP_DETAILS") or locals().get("SBP_DETAILS") or "+79088006072").strip()
-SBP_BANK_INFO = (os.getenv("SBP_BANK_INFO") or locals().get("SBP_BANK_INFO") or "❄️ Банк ВТБ").strip()
+SBP_BANK_INFO = (os.getenv("SBP_BANK_INFO") or locals().get("SBP_BANK_INFO") or "🐸 Банк ВТБ").strip()
 LTC_WALLET = (
     os.getenv("LTC_WALLET")
     or locals().get("LTC_WALLET")
@@ -197,20 +197,20 @@ def format_operator_label(user_id: int | None, username: str | None = None) -> s
 
 
 def build_operator_signature(user_id: int | None, username: str | None = None) -> str:
-    return f"👤 {format_operator_label(user_id, username)}"
+    return f"🧟 {format_operator_label(user_id, username)}"
 
 
 CHANNEL_URL = (os.getenv("CHANNEL_URL") or DEFAULT_CHANNEL_URL).strip()
 OPERATOR_URL = (os.getenv("OPERATOR_URL") or DEFAULT_OPERATOR_URL).strip()
 CHAT_URL = (os.getenv("CHAT_URL") or DEFAULT_CHAT_URL).strip()
 
-PROFILE_BTN = "Профиль ✨"
-ORDER_BTN = "Заказать такси 🎄🛷"
-HELP_BTN = "Помощь ❄️"
-PRICE_BTN = "Проверить цену 💸"
-ADMIN_BTN = "Админка 🎅"
-BACK_BTN = "Назад ⛄️"
-FAQ_BTN = "FAQ 📚"
+PROFILE_BTN = "Профиль 🐍"
+ORDER_BTN = "Заказать такси 🐲🦖"
+HELP_BTN = "Помощь 🐸"
+PRICE_BTN = "Проверить цену 🟩"
+ADMIN_BTN = "Админка 🧟‍♂️"
+BACK_BTN = "Назад 🧟"
+FAQ_BTN = "FAQ 🧬"
 
 MAIN_MENU_BUTTONS = {
     PROFILE_BTN,
@@ -229,13 +229,13 @@ YANDEX_TAXI_TOKEN = (
 )
 YANDEX_PRICE_CLASS = "comfortplus"
 PRICE_TARIFFS = [
-    ("econom", "🚕 Эконом"),
-    ("business", "🚘 Комфорт"),
-    ("comfortplus", "🚗 Комфорт+"),
-    ("minivan", "🚐 Минивэн"),
-    ("vip", "💼 Бизнес"),
-    ("ultimate", "✨ Премьер"),
-    ("maybach", "👑 Элит"),
+    ("econom", "🐊 Эконом"),
+    ("business", "🐢 Комфорт"),
+    ("comfortplus", "🦎 Комфорт+"),
+    ("minivan", "🐉 Минивэн"),
+    ("vip", "🧫 Бизнес"),
+    ("ultimate", "🐍 Премьер"),
+    ("maybach", "🐲 Элит"),
 ]
 
 ORDER_TARIFF_PRICE_CLASS = {
@@ -311,6 +311,7 @@ def init_db(db_path=DB_PATH):
                 base_amount REAL,
                 promo_code TEXT,
                 promo_discount REAL DEFAULT 0.00,
+                free_ride INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP
             )
@@ -327,6 +328,7 @@ def init_db(db_path=DB_PATH):
             "bot_token": "TEXT",
             "promo_code": "TEXT",
             "promo_discount": "REAL DEFAULT 0.00",
+            "free_ride": "INTEGER DEFAULT 0",
         }
         for column, definition in new_columns.items():
             if column not in existing_columns:
@@ -620,25 +622,25 @@ def create_promo_code(discount: float, activations_total: int) -> str:
 def redeem_promo_code(tg_id: int, code: str) -> tuple[bool, str, float]:
     normalized = (code or "").strip().upper()
     if not normalized:
-        return False, "🎄🚫 Пустой промокод.", 0.0
+        return False, "🐲🧪 Пустой промокод.", 0.0
 
     active_code, _ = get_user_promo(tg_id)
     if active_code:
-        return False, f"🎁 У вас уже активирован промокод {active_code}.", 0.0
+        return False, f"🧪 У вас уже активирован промокод {active_code}.", 0.0
 
     with sqlite3.connect(USERS_DB) as conn:
         c = conn.cursor()
         c.execute("SELECT discount, activations_total, activations_used FROM promo_codes WHERE code=?", (normalized,))
         row = c.fetchone()
         if not row:
-            return False, "🎄🚫 Промокод не найден.", 0.0
+            return False, "🐲🧪 Промокод не найден.", 0.0
         discount, total, used = row
         if total is not None and used >= total:
-            return False, "❄️ Промокод уже закончился.", 0.0
+            return False, "🐸 Промокод уже закончился.", 0.0
 
         c.execute("SELECT 1 FROM promo_redemptions WHERE code=? AND tg_id=?", (normalized, tg_id))
         if c.fetchone():
-            return False, "❄️ Этот промокод уже использован вами.", 0.0
+            return False, "🐸 Этот промокод уже использован вами.", 0.0
 
         c.execute(
             "INSERT INTO promo_redemptions (code, tg_id) VALUES (?, ?)",
@@ -652,7 +654,7 @@ def redeem_promo_code(tg_id: int, code: str) -> tuple[bool, str, float]:
 
     discount_value = float(discount or 0)
     set_user_promo(tg_id, normalized, discount_value)
-    return True, f"🎉 Промокод {normalized} активирован. Скидка {discount_value:.2f} ₽ будет применена к следующему заказу.", discount_value
+    return True, f"👾 Промокод {normalized} активирован. Скидка {discount_value:.2f} ₽ будет применена к следующему заказу.", discount_value
 
 
 def ensure_referral_code(tg_id: int) -> str:
@@ -1052,14 +1054,14 @@ async def notify_admins_invalid_bot(token: str, reason: str, owner_id: int | Non
     if owner_id:
         owner_info = get_user(owner_id)
         if owner_info and owner_info.get("username"):
-            owner_hint = f"\n👤 Владелец: @{owner_info['username']}"
+            owner_hint = f"\n🧟 Владелец: @{owner_info['username']}"
         else:
-            owner_hint = f"\n👤 Владелец: {owner_id}"
+            owner_hint = f"\n🧟 Владелец: {owner_id}"
 
     text = (
-        "⚠️ Ошибка запуска подключённого бота\n"
-        f"🔑 Токен: {token}\n"
-        f"🚫 Причина: {reason}{owner_hint}\n"
+        "🟩 Ошибка запуска подключённого бота\n"
+        f"🧪 Токен: {token}\n"
+        f"🧪 Причина: {reason}{owner_hint}\n"
         "Токен удалён из базы, работа продолжается."
     )
 
@@ -1481,7 +1483,7 @@ def admin_only(func):
         if user_id not in ADMIN_IDS:
             target = update.effective_message
             if target:
-                await target.reply_text("🎄🚫 У вас нет прав администратора")
+                await target.reply_text("🐲🧪 У вас нет прав администратора")
             return
         return await func(update, context)
     return wrapper
@@ -1533,19 +1535,19 @@ def back_keyboard():
 def start_links_keyboard():
     buttons = [
         [
-            InlineKeyboardButton("🎄 Канал", url=CHANNEL_URL),
-            InlineKeyboardButton("✨ Оператор", url=OPERATOR_URL),
+            InlineKeyboardButton("🐲 Канал", url=CHANNEL_URL),
+            InlineKeyboardButton("🐍 Оператор", url=OPERATOR_URL),
         ],
         [
-            InlineKeyboardButton("❄️ Чат", url=CHAT_URL),
-            InlineKeyboardButton("📚 FAQ", url=FAQ_URL),
+            InlineKeyboardButton("🐸 Чат", url=CHAT_URL),
+            InlineKeyboardButton("🧬 FAQ", url=FAQ_URL),
         ],
     ]
     return InlineKeyboardMarkup(buttons)
 
 
 def faq_keyboard():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("📚 FAQ", url=FAQ_URL)]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🧬 FAQ", url=FAQ_URL)]])
 
 
 def taxi_force_reply_markup():
@@ -1554,25 +1556,25 @@ def taxi_force_reply_markup():
 
 def profile_keyboard(has_city: bool, has_favorites: bool):
     buttons = []
-    city_buttons = [InlineKeyboardButton("🌟 Указать город" if not has_city else "🖊️❄️ Изменить город", callback_data="profile_city_set")]
+    city_buttons = [InlineKeyboardButton("🟢 Указать город" if not has_city else "🧬🐸 Изменить город", callback_data="profile_city_set")]
     if has_city:
-        city_buttons.append(InlineKeyboardButton("🎄 Удалить город", callback_data="profile_city_clear"))
+        city_buttons.append(InlineKeyboardButton("🐲 Удалить город", callback_data="profile_city_clear"))
     buttons.append(city_buttons)
 
-    fav_row = [InlineKeyboardButton("❄️ Любимые адреса", callback_data="profile_fav_manage")]
+    fav_row = [InlineKeyboardButton("🐸 Любимые адреса", callback_data="profile_fav_manage")]
     buttons.append(fav_row)
-    buttons.append([InlineKeyboardButton("🎁 Реферальная программа", callback_data="profile_referral")])
-    buttons.append([InlineKeyboardButton("🎁 Ввести промокод", callback_data="profile_promo")])
-    buttons.append([InlineKeyboardButton("🎄 Добавить своего бота", callback_data="profile_bots")])
-    buttons.append([InlineKeyboardButton("🎄 В главное меню", callback_data="profile_back")])
+    buttons.append([InlineKeyboardButton("🧪 Реферальная программа", callback_data="profile_referral")])
+    buttons.append([InlineKeyboardButton("🧪 Ввести промокод", callback_data="profile_promo")])
+    buttons.append([InlineKeyboardButton("🐲 Добавить своего бота", callback_data="profile_bots")])
+    buttons.append([InlineKeyboardButton("🐲 В главное меню", callback_data="profile_back")])
     return InlineKeyboardMarkup(buttons)
 
 
 def referral_keyboard():
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("📜 История начислений", callback_data="profile_ref_history")],
-            [InlineKeyboardButton("🎄 Назад в профиль", callback_data="profile_ref_back")],
+            [InlineKeyboardButton("🧬 История начислений", callback_data="profile_ref_history")],
+            [InlineKeyboardButton("🐲 Назад в профиль", callback_data="profile_ref_back")],
         ]
     )
 
@@ -1581,12 +1583,12 @@ def favorites_manage_keyboard(favorites):
     buttons = []
     for fav in favorites:
         buttons.append([
-            InlineKeyboardButton(f"🖊️❄️ {fav['address']}", callback_data=f"profile_fav_edit_{fav['id']}"),
-            InlineKeyboardButton("🎄 Удалить", callback_data=f"profile_fav_delete_{fav['id']}")
+            InlineKeyboardButton(f"🧬🐸 {fav['address']}", callback_data=f"profile_fav_edit_{fav['id']}"),
+            InlineKeyboardButton("🐲 Удалить", callback_data=f"profile_fav_delete_{fav['id']}")
         ])
     if len(favorites) < 3:
-        buttons.append([InlineKeyboardButton("🎁 Добавить адрес", callback_data="profile_fav_add")])
-    buttons.append([InlineKeyboardButton("🎄 Назад", callback_data="profile_fav_back")])
+        buttons.append([InlineKeyboardButton("🧪 Добавить адрес", callback_data="profile_fav_add")])
+    buttons.append([InlineKeyboardButton("🐲 Назад", callback_data="profile_fav_back")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -1594,7 +1596,7 @@ def favorites_select_keyboard(favorites, stage):
     buttons = []
     for fav in favorites:
         buttons.append([InlineKeyboardButton(fav['address'], callback_data=f"fav_{stage}_{fav['id']}")])
-    buttons.append([InlineKeyboardButton("🕯️ Ввести новый", callback_data=f"fav_{stage}_manual")])
+    buttons.append([InlineKeyboardButton("🧪 Ввести новый", callback_data=f"fav_{stage}_manual")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -1604,17 +1606,17 @@ def bots_manage_keyboard(bots):
         label = bot.get("title") or bot.get("token", "")
         label = label or "Без названия"
         buttons.append([
-            InlineKeyboardButton(f"🎄 Удалить {label}", callback_data=f"profile_bot_delete_{bot['id']}")
+            InlineKeyboardButton(f"🐲 Удалить {label}", callback_data=f"profile_bot_delete_{bot['id']}")
         ])
-    buttons.append([InlineKeyboardButton("🎁 Добавить бота", callback_data="profile_bot_add")])
-    buttons.append([InlineKeyboardButton("🎄 Назад", callback_data="profile_back")])
+    buttons.append([InlineKeyboardButton("🧪 Добавить бота", callback_data="profile_bot_add")])
+    buttons.append([InlineKeyboardButton("🐲 Назад", callback_data="profile_back")])
     return InlineKeyboardMarkup(buttons)
 
 def order_type_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Отправить скриншотом 🌠️", callback_data="order_screenshot")],
-        [InlineKeyboardButton("Отправить текстом 🕯️", callback_data="order_text")],
-        [InlineKeyboardButton("Назад 🎄", callback_data="order_back")]
+        [InlineKeyboardButton("Отправить скриншотом 🟢️", callback_data="order_screenshot")],
+        [InlineKeyboardButton("Отправить текстом 🧪", callback_data="order_text")],
+        [InlineKeyboardButton("Назад 🐲", callback_data="order_back")]
     ])
 
 
@@ -1639,27 +1641,27 @@ def set_active_token2(token2: str, tg_id=None):
 def yes_no_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🎉 Добавить", callback_data="address_yes"),
-            InlineKeyboardButton("🎄🚫 Пропустить", callback_data="address_no"),
+            InlineKeyboardButton("👾 Добавить", callback_data="address_yes"),
+            InlineKeyboardButton("🐲🧪 Пропустить", callback_data="address_no"),
         ]
     ])
 
 
 def tariff_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Эконом 🎁", callback_data="tariff_Эконом"), InlineKeyboardButton("Комфорт ✨", callback_data="tariff_Комфорт")],
-        [InlineKeyboardButton("Комфорт+ ✨", callback_data="tariff_Комфорт+"), InlineKeyboardButton("Бизнес 🎄", callback_data="tariff_Бизнес")],
-        [InlineKeyboardButton("Премьер 🎉", callback_data="tariff_Премьер"), InlineKeyboardButton("Элит 🎆", callback_data="tariff_Элит")],
+        [InlineKeyboardButton("Эконом 🧪", callback_data="tariff_Эконом"), InlineKeyboardButton("Комфорт 🐍", callback_data="tariff_Комфорт")],
+        [InlineKeyboardButton("Комфорт+ 🐍", callback_data="tariff_Комфорт+"), InlineKeyboardButton("Бизнес 🐲", callback_data="tariff_Бизнес")],
+        [InlineKeyboardButton("Премьер 👾", callback_data="tariff_Премьер"), InlineKeyboardButton("Элит 👾", callback_data="tariff_Элит")],
     ])
 
 
 def child_seat_type_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎁 Свое", callback_data="seat_type_Свое")],
-        [InlineKeyboardButton("🧸 9м - 4л", callback_data="seat_type_9м-4л")],
-        [InlineKeyboardButton("🧝 3-7л", callback_data="seat_type_3-7л")],
-        [InlineKeyboardButton("🧝 6-12л", callback_data="seat_type_6-12л")],
-        [InlineKeyboardButton("🎄 Назад", callback_data="seat_type_exit")],
+        [InlineKeyboardButton("🧪 Свое", callback_data="seat_type_Свое")],
+        [InlineKeyboardButton("🦖 9м - 4л", callback_data="seat_type_9м-4л")],
+        [InlineKeyboardButton("🦎 3-7л", callback_data="seat_type_3-7л")],
+        [InlineKeyboardButton("🦎 6-12л", callback_data="seat_type_6-12л")],
+        [InlineKeyboardButton("🐲 Назад", callback_data="seat_type_exit")],
     ])
 
 
@@ -1669,7 +1671,7 @@ def additional_options_keyboard(order_data):
     child_seat_type = order_data.get("child_seat_type")
 
     def mark(text, active):
-        return f"{'🎉' if active else '❄️'} {text}"
+        return f"{'👾' if active else '🐸'} {text}"
 
     child_selected = child_seat is not None and child_seat != "Не требуется"
     child_label = "Детское кресло"
@@ -1679,15 +1681,15 @@ def additional_options_keyboard(order_data):
 
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(mark(child_label, child_selected), callback_data="additional_child")],
-        [InlineKeyboardButton(mark("Перевозка животных ❄️", "Перевозка животных" in selected_wishes), callback_data="additional_animals")],
-        [InlineKeyboardButton(mark("Буду с инвалидным креслом ❄️♿", "Буду с инвалидным креслом" in selected_wishes), callback_data="additional_wheelchair")],
-        [InlineKeyboardButton("🎉 Готово", callback_data="additional_done"), InlineKeyboardButton("⛄️ Пропустить", callback_data="additional_skip")],
+        [InlineKeyboardButton(mark("Перевозка животных 🐸", "Перевозка животных" in selected_wishes), callback_data="additional_animals")],
+        [InlineKeyboardButton(mark("Буду с инвалидным креслом 🐸♿", "Буду с инвалидным креслом" in selected_wishes), callback_data="additional_wheelchair")],
+        [InlineKeyboardButton("👾 Готово", callback_data="additional_done"), InlineKeyboardButton("🧟 Пропустить", callback_data="additional_skip")],
     ])
 
 
 def replacement_fields_keyboard(info):
     def mark(value, label):
-        return f"{'🎉' if value else '🎁'} {label}"
+        return f"{'👾' if value else '🧪'} {label}"
 
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(mark(info.get("order_number"), "OrderID"), callback_data=f"replacement_field_orderid_{info['id']}")],
@@ -1695,7 +1697,7 @@ def replacement_fields_keyboard(info):
         [InlineKeyboardButton(mark(info.get("external_id"), "ID"), callback_data=f"replacement_field_extid_{info['id']}")],
         [InlineKeyboardButton(mark(info.get("token2"), "token2"), callback_data=f"replacement_field_token2_{info['id']}")],
         [InlineKeyboardButton(mark(info.get("link"), "Ссылка"), callback_data=f"replacement_field_link_{info['id']}")],
-        [InlineKeyboardButton("🎄 Назад", callback_data="replacement_back")],
+        [InlineKeyboardButton("🐲 Назад", callback_data="replacement_back")],
     ])
 
 
@@ -1704,7 +1706,7 @@ def replacement_list_keyboard(infos):
     for info in infos:
         label = f"{info.get('created_at', '')}"
         buttons.append([InlineKeyboardButton(label, callback_data=f"replacement_view_{info['id']}")])
-    buttons.append([InlineKeyboardButton("🎄 В админку", callback_data="replacement_back")])
+    buttons.append([InlineKeyboardButton("🐲 В админку", callback_data="replacement_back")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -1718,12 +1720,12 @@ def payment_methods_keyboard(prefix: str, order_id: int | None = None):
         base = f"{prefix}{order_id}_"
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🎁 Карта", callback_data=f"{base}transfer")],
-            [InlineKeyboardButton("🎁 СБП", callback_data=f"{base}sbp")],
-            [InlineKeyboardButton("🪙🎄 Litecoin", callback_data=f"{base}ltc")],
-            [InlineKeyboardButton("🎁 USDT (TRC20)", callback_data=f"{base}usdt_trc20")],
-            [InlineKeyboardButton("🎁 USDT (TRX)", callback_data=f"{base}usdt_trx")],
-            [InlineKeyboardButton("🎄 Назад", callback_data="profile_back")],
+            [InlineKeyboardButton("🧪 Карта", callback_data=f"{base}transfer")],
+            [InlineKeyboardButton("🧪 СБП", callback_data=f"{base}sbp")],
+            [InlineKeyboardButton("🟩🐲 Litecoin", callback_data=f"{base}ltc")],
+            [InlineKeyboardButton("🧪 USDT (TRC20)", callback_data=f"{base}usdt_trc20")],
+            [InlineKeyboardButton("🧪 USDT (TRX)", callback_data=f"{base}usdt_trx")],
+            [InlineKeyboardButton("🐲 Назад", callback_data="profile_back")],
         ]
     )
 
@@ -1737,13 +1739,17 @@ async def send_payment_menu(order: dict, bot: Bot):
     total = order.get("amount") or base_amount
     promo_discount = float(order.get("promo_discount") or 0)
     promo_code = order.get("promo_code")
+    free_ride = bool(order.get("free_ride"))
     tg_id = order.get("tg_id")
 
     message = (
-        "🧾🎄 Оплата поездки\n"
-        f"🛷 Заказ №{order_id}\n"
-        f"🎁 Стоимость: {base_amount:.2f} ₽\n"
-        + (f"🎁 Скидка по промокоду {promo_code}: -{promo_discount:.2f} ₽\n" if promo_discount else "")
+        "🧫🐲 Оплата поездки\n"
+        f"🦖 Заказ №{order_id}\n"
+        f"🧪 Стоимость: {base_amount:.2f} ₽\n"
+        + (
+            "🟢 Бесплатная поездка: каждая 15-я до 1000 ₽\n" if free_ride else ""
+        )
+        + (f"🧪 Скидка по промокоду {promo_code}: -{promo_discount:.2f} ₽\n" if promo_discount and not free_ride else "")
         + f"К оплате: {total:.2f} ₽\n\n"
         "Выберите удобный способ оплаты:"
     )
@@ -1756,24 +1762,24 @@ async def send_payment_menu(order: dict, bot: Bot):
 
 def admin_order_buttons(order_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Взял в работу 🎉", callback_data=f"take_{order_id}"),
-         InlineKeyboardButton("Отклонить 🎄🚫", callback_data=f"reject_{order_id}")]
+        [InlineKeyboardButton("Взял в работу 👾", callback_data=f"take_{order_id}"),
+         InlineKeyboardButton("Отклонить 🐲🧪", callback_data=f"reject_{order_id}")]
     ])
 
 def admin_in_progress_buttons(order_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Поиск такси ✨", callback_data=f"search_{order_id}"),
-         InlineKeyboardButton("Отменить заказ 🎄🚫", callback_data=f"cancel_{order_id}")]
+        [InlineKeyboardButton("Поиск такси 🐍", callback_data=f"search_{order_id}"),
+         InlineKeyboardButton("Отменить заказ 🐲🧪", callback_data=f"cancel_{order_id}")]
     ])
 
 def admin_search_buttons(order_id):
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("Связаться с заказчиком 🔔", callback_data=f"chat_{order_id}"),
-            InlineKeyboardButton("Отправить фото 📷", callback_data=f"sendphoto_{order_id}"),
+            InlineKeyboardButton("Связаться с заказчиком 🧿", callback_data=f"chat_{order_id}"),
+            InlineKeyboardButton("Отправить фото 🧪", callback_data=f"sendphoto_{order_id}"),
         ],
-        [InlineKeyboardButton("Нашлась машина 🛷", callback_data=f"found_{order_id}"),
-         InlineKeyboardButton("Отменить поиск ❄️🚫", callback_data=f"cancelsearch_{order_id}")]
+        [InlineKeyboardButton("Нашлась машина 🦖", callback_data=f"found_{order_id}"),
+         InlineKeyboardButton("Отменить поиск 🐸🧪", callback_data=f"cancelsearch_{order_id}")]
     ])
 
 
@@ -1793,33 +1799,33 @@ async def edit_admin_message(query, text: str, reply_markup=None):
 
 def payment_choice_keyboard(order_id):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎁 Отправить способы оплаты", callback_data=f"pay_card_{order_id}")],
+        [InlineKeyboardButton("🧪 Отправить способы оплаты", callback_data=f"pay_card_{order_id}")],
     ])
 
 
 def admin_panel_keyboard():
     ordering_enabled = is_ordering_enabled()
-    ordering_label = "⛄️ Остановить приём заказов" if ordering_enabled else "🎄 Включить приём заказов"
-    status_text = "🎉 Заказы включены" if ordering_enabled else "🧊 Заказы выключены"
+    ordering_label = "🧟 Остановить приём заказов" if ordering_enabled else "🐲 Включить приём заказов"
+    status_text = "👾 Заказы включены" if ordering_enabled else "🟩 Заказы выключены"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎁 Заказы пользователя", callback_data="admin_orders")],
-        [InlineKeyboardButton("🔔 Обновить информацию", callback_data="admin_refresh")],
-        [InlineKeyboardButton("🎁 Выпуск промокодов", callback_data="admin_promo")],
-        [InlineKeyboardButton("📡 Все боты", callback_data="admin_all_bots")],
-        [InlineKeyboardButton("🗂️ БД франшизы", callback_data="admin_franchise_db")],
-        [InlineKeyboardButton("🎺 Рассылка по всем", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("👥 Кол-во пользователей", callback_data="admin_users_count")],
-        [InlineKeyboardButton("📂 Выгрузить БД", callback_data="admin_dump_db")],
-        [InlineKeyboardButton("🔄 Перезапуск ботов", callback_data="admin_restart_bots")],
-        [InlineKeyboardButton("🔔 Заказы для подмены", callback_data="admin_replacements")],
-        [InlineKeyboardButton("🧹 Очистить подмены", callback_data="admin_podmena_clear")],
+        [InlineKeyboardButton("🧪 Заказы пользователя", callback_data="admin_orders")],
+        [InlineKeyboardButton("🧿 Обновить информацию", callback_data="admin_refresh")],
+        [InlineKeyboardButton("🧪 Выпуск промокодов", callback_data="admin_promo")],
+        [InlineKeyboardButton("🧬 Все боты", callback_data="admin_all_bots")],
+        [InlineKeyboardButton("🧬 БД франшизы", callback_data="admin_franchise_db")],
+        [InlineKeyboardButton("🐲 Рассылка по всем", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("🐸 Кол-во пользователей", callback_data="admin_users_count")],
+        [InlineKeyboardButton("🧪 Выгрузить БД", callback_data="admin_dump_db")],
+        [InlineKeyboardButton("🟢 Перезапуск ботов", callback_data="admin_restart_bots")],
+        [InlineKeyboardButton("🧿 Заказы для подмены", callback_data="admin_replacements")],
+        [InlineKeyboardButton("🧪 Очистить подмены", callback_data="admin_podmena_clear")],
         [InlineKeyboardButton(ordering_label, callback_data="admin_toggle")],
         [InlineKeyboardButton(status_text, callback_data="admin_status")],
     ])
 
 
 async def admin_show_panel(target):
-    await target.reply_text("🔔❄️ Админ-панель", reply_markup=admin_panel_keyboard())
+    await target.reply_text("🧿🐸 Админ-панель", reply_markup=admin_panel_keyboard())
 
 
 def admins_bots_keyboard():
@@ -1836,7 +1842,7 @@ def admins_bots_keyboard():
         buttons.append([InlineKeyboardButton(label, callback_data=f"admin_owner_{owner_id}")])
     if not buttons:
         buttons.append([InlineKeyboardButton("Нет подключённых ботов", callback_data="admin_status")])
-    buttons.append([InlineKeyboardButton("🎄 Главное меню", callback_data="admin_status")])
+    buttons.append([InlineKeyboardButton("🐲 Главное меню", callback_data="admin_status")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -1851,27 +1857,27 @@ def admin_owner_keyboard(owner_id: int, bots: list[dict]):
             [InlineKeyboardButton(f"➖ Списать с баланса ({title})", callback_data=f"botsub_{bot.get('id')}")]
         )
         buttons.append(
-            [InlineKeyboardButton(f"Обнулить {title} ⛄️", callback_data=f"botreset_{bot.get('id')}")]
+            [InlineKeyboardButton(f"Обнулить {title} 🧟", callback_data=f"botreset_{bot.get('id')}")]
         )
-    buttons.append([InlineKeyboardButton("🎄 Главное меню", callback_data="admin_status")])
-    buttons.append([InlineKeyboardButton("📡 К списку владельцев", callback_data="admin_all_bots")])
+    buttons.append([InlineKeyboardButton("🐲 Главное меню", callback_data="admin_status")])
+    buttons.append([InlineKeyboardButton("🧬 К списку владельцев", callback_data="admin_all_bots")])
     return InlineKeyboardMarkup(buttons)
 
 
 def build_owner_summary(owner_id: int, bots: list[dict]) -> str:
     owner = get_user(owner_id) or {}
-    lines = [f"🧑‍💻 Владелец: @{owner.get('username') or owner_id}"]
+    lines = [f"🧟‍♂️ Владелец: @{owner.get('username') or owner_id}"]
     for bot in bots:
         token = bot.get("token")
         lines.append(
             "\n".join(
                 [
-                    "🤖 Бот: " + (bot.get("title") or "Без названия"),
-                    f"🔑 Токен: {token}",
-                    f"👥 Пользователи: {count_bot_users(token)}",
-                    f"🧾 Заказы: {count_bot_orders(token)}",
-                    f"🎁 Начислено (до вывода): {float(bot.get('pending_reward') or 0):.2f} ₽",
-                    f"💸 Доход по заказам: {calc_owner_earnings(token):.2f} ₽",
+                    "👾 Бот: " + (bot.get("title") or "Без названия"),
+                    f"🧪 Токен: {token}",
+                    f"🐸 Пользователи: {count_bot_users(token)}",
+                    f"🧫 Заказы: {count_bot_orders(token)}",
+                    f"🧪 Начислено (до вывода): {float(bot.get('pending_reward') or 0):.2f} ₽",
+                    f"🟩 Доход по заказам: {calc_owner_earnings(token):.2f} ₽",
                 ]
             )
         )
@@ -1890,7 +1896,7 @@ def not_banned(func):
             if c.fetchone():
                 target = update.effective_message
                 if target:
-                    await target.reply_text("🎄🚫 Вы заблокированы и не можете использовать бота.")
+                    await target.reply_text("🐲🧪 Вы заблокированы и не можете использовать бота.")
                 return
         return await func(update, context)
     return wrapper
@@ -1907,21 +1913,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     target = update.effective_message
     if target:
         await target.reply_text(
-            f"🎄 Привет, @{user.username or 'не указан'}! Добро пожаловать в сказочный сервис заказа такси 🎆🛷",
+            f"🐲 Привет, @{user.username or 'не указан'}! Добро пожаловать в монстро-сервис заказа такси 👾🦖",
             reply_markup=start_links_keyboard(),
         )
         await target.reply_text(
-            "🎉 С наступающим Новым годом! 🎁", reply_markup=main_menu_keyboard(user.id)
+            "👾 Готовы вызвать машину? Жмите меню ниже.", reply_markup=main_menu_keyboard(user.id)
         )
     else:
         await context.bot.send_message(
             chat_id=user.id,
-            text=f"🎄 Привет, @{user.username or 'не указан'}! Добро пожаловать в сказочный сервис заказа такси 🎆🛷",
+            text=f"🐲 Привет, @{user.username or 'не указан'}! Добро пожаловать в монстро-сервис заказа такси 👾🦖",
             reply_markup=start_links_keyboard(),
         )
         await context.bot.send_message(
             chat_id=user.id,
-            text="🎉 С наступающим Новым годом! 🎁",
+            text="👾 Готовы вызвать машину? Жмите меню ниже.",
             reply_markup=main_menu_keyboard(user.id),
         )
 
@@ -1957,7 +1963,7 @@ async def send_profile_info(target, user_id, context):
     favorites_text = "\n".join([f"{idx + 1}. {fav['address']}" for idx, fav in enumerate(favorites)]) or "—"
 
     text = (
-        f"🎅 Профиль\n"
+        f"🧟‍♂️ Профиль\n"
         f"Username: @{username or 'не указан'}\n"
         f"Telegram ID: {user_id}\n"
         f"Заказано поездок: {orders_count}\n"
@@ -1984,11 +1990,12 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "🆘 Помощь по сервису\n"
-        "1. Для заказа такси нажмите «Заказать такси 🛷».\n"
+        "🧟 Помощь по сервису\n"
+        "1. Для заказа такси нажмите «Заказать такси 🦖».\n"
         "2. Вы можете отправить заказ скриншотом или текстом.\n"
         "3. Статус заказа отслеживается через уведомления.\n"
-        "4. При проблемах — пишите @TakeMaxist"
+        "4. Каждая 15-я поездка до 1000 ₽ — бесплатно.\n"
+        "5. При проблемах — пишите @TakeMaxist"
     )
     await update.message.reply_text(text, reply_markup=back_keyboard())
 
@@ -2090,12 +2097,12 @@ async def build_and_send_payment(user_id: int, method: str, amount: float | None
     if method in {"ltc", "usdt_trc20", "usdt_trx"}:
         rate = fetch_crypto_rate(method)
         if rate:
-            rate_text = f"✨ Курс: 1 {currency} = {rate:.2f} ₽"
+            rate_text = f"🐍 Курс: 1 {currency} = {rate:.2f} ₽"
             if amount is not None:
                 converted = round(amount / rate, 4)
                 amount = converted
         else:
-            rate_text = "❄️⚠️ Курс недоступен, используйте рублёвый эквивалент"
+            rate_text = "🐸🟩 Курс недоступен, используйте рублёвый эквивалент"
 
     payment_id = create_payment(
         tg_id=user_id,
@@ -2111,14 +2118,14 @@ async def build_and_send_payment(user_id: int, method: str, amount: float | None
     )
 
     method_titles = {
-        "transfer": "🎁 Карта",
-        "sbp": "🎁 СБП",
-        "ltc": "🪙🎄 Litecoin",
-        "usdt_trc20": "🎁 USDT (TRC20)",
-        "usdt_trx": "🎁 USDT (TRX)",
+        "transfer": "🧪 Карта",
+        "sbp": "🧪 СБП",
+        "ltc": "🟩🐲 Litecoin",
+        "usdt_trc20": "🧪 USDT (TRC20)",
+        "usdt_trx": "🧪 USDT (TRX)",
     }
     parts = [
-        "🎁 Детали оплаты:",
+        "🧪 Детали оплаты:",
         f"Метод: {method_titles.get(method, method)}",
     ]
     if amount is None:
@@ -2133,7 +2140,7 @@ async def build_and_send_payment(user_id: int, method: str, amount: float | None
 
     parts.append(f"Реквизиты: {requisites_text}")
     if currency != "RUB" and original_amount is not None:
-        parts.append(f"🎁 Эквивалент: {original_amount:.2f} {original_currency}")
+        parts.append(f"🧪 Эквивалент: {original_amount:.2f} {original_currency}")
     if rate_text:
         parts.append(rate_text)
     if comment_code:
@@ -2141,9 +2148,9 @@ async def build_and_send_payment(user_id: int, method: str, amount: float | None
     parts.append("После оплаты сообщите об оплате ниже, мы проверим и подтвердим заказ.")
 
     buttons = [
-        [InlineKeyboardButton("🎉 Оплатил", callback_data=f"payment_paid_{payment_id}")],
-        [InlineKeyboardButton("✨ Проверить оплату", callback_data=f"payment_check_{payment_id}")],
-        [InlineKeyboardButton("🎄🚫 Отменить", callback_data=f"payment_cancel_{payment_id}")],
+        [InlineKeyboardButton("👾 Оплатил", callback_data=f"payment_paid_{payment_id}")],
+        [InlineKeyboardButton("🐍 Проверить оплату", callback_data=f"payment_check_{payment_id}")],
+        [InlineKeyboardButton("🐲🧪 Отменить", callback_data=f"payment_cancel_{payment_id}")],
     ]
     keyboard = InlineKeyboardMarkup(buttons)
     await target.reply_text("\n".join(parts), reply_markup=keyboard, parse_mode="HTML")
@@ -2158,10 +2165,10 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "profile_city_set":
         context.user_data["awaiting_city"] = True
-        await query.message.reply_text("🌟️ Введите ваш город:")
+        await query.message.reply_text("🟢️ Введите ваш город:")
     elif data == "profile_city_clear":
         update_user_city(user_id, None)
-        await query.message.reply_text("🧹️ Город удалён")
+        await query.message.reply_text("🧪️ Город удалён")
         await send_profile_info(query.message, user_id, context)
     elif data == "profile_back":
         await query.message.reply_text(
@@ -2174,7 +2181,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         invited = count_user_referrals(user_id)
         balance = float(user.get("referral_balance") or 0)
         ref_text = (
-            "🎁 Реферальная программа\n"
+            "🧪 Реферальная программа\n"
             f"Реферальный баланс: {balance:.2f} ₽\n"
             f"Код для друзей: {referral_code}\n"
             f"Ссылка: {link}\n"
@@ -2187,7 +2194,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not history:
             text = "Пока нет начислений по рефералке."
         else:
-            parts = ["📜 История реферальных начислений:"]
+            parts = ["🧬 История реферальных начислений:"]
             for item in history:
                 friend = get_user(item.get("referred_user_id"))
                 friend_label = f"@{friend.get('username')}" if friend and friend.get("username") else (str(item.get("referred_user_id")) or "—")
@@ -2202,11 +2209,11 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_profile_info(query.message, user_id, context)
     elif data == "profile_promo":
         context.user_data["awaiting_promo"] = True
-        await query.message.reply_text("🎁 Введите промокод:")
+        await query.message.reply_text("🧪 Введите промокод:")
     elif data == "profile_fav_manage":
         favorites = get_favorite_addresses(user_id)
         await query.message.reply_text(
-            "❄️ Любимые адреса",
+            "🐸 Любимые адреса",
             reply_markup=favorites_manage_keyboard(favorites),
         )
     elif data == "profile_fav_add":
@@ -2215,19 +2222,19 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("Можно сохранить не более 3 адресов", show_alert=True)
             return
         context.user_data["awaiting_fav_action"] = "add"
-        await query.message.reply_text("🎁 Пришлите адрес, который хотите добавить в избранное")
+        await query.message.reply_text("🧪 Пришлите адрес, который хотите добавить в избранное")
     elif data.startswith("profile_fav_edit_"):
         fav_id = int(data.rsplit("_", 1)[1])
         context.user_data["awaiting_fav_action"] = "edit"
         context.user_data["fav_edit_id"] = fav_id
-        await query.message.reply_text("🖊️❄️ Пришлите новый вариант адреса")
+        await query.message.reply_text("🧬🐸 Пришлите новый вариант адреса")
     elif data.startswith("profile_fav_delete_"):
         fav_id = int(data.rsplit("_", 1)[1])
         delete_favorite_address(fav_id, user_id)
-        await query.message.reply_text("🎄 Адрес удалён")
+        await query.message.reply_text("🐲 Адрес удалён")
         favorites = get_favorite_addresses(user_id)
         await query.message.reply_text(
-            "❄️ Любимые адреса",
+            "🐸 Любимые адреса",
             reply_markup=favorites_manage_keyboard(favorites),
         )
     elif data == "profile_fav_back":
@@ -2236,7 +2243,7 @@ async def profile_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bots = list_user_bots(user_id)
         if bots:
             await query.message.reply_text(
-                "🎄 Ваши боты", reply_markup=bots_manage_keyboard(bots)
+                "🐲 Ваши боты", reply_markup=bots_manage_keyboard(bots)
             )
         else:
             await query.message.reply_text(
@@ -2317,7 +2324,7 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
 async def order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_ordering_enabled():
         await update.message.reply_text(
-            "🔔 Заказ такси временно недоступен. Бот на технических работах, попробуйте позже.",
+            "🧿 Заказ такси временно недоступен. Бот на технических работах, попробуйте позже.",
             reply_markup=main_menu_keyboard(update.effective_user.id),
         )
         return
@@ -2327,7 +2334,7 @@ async def order_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def price_check_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["price_check"] = {}
     await update.message.reply_text(
-        "💸 <b>Проверка цены</b>\n\n🏙️ Введите город/посёлок для точки А:",
+        "🟩 <b>Проверка цены</b>\n\n🧬 Введите город/посёлок для точки А:",
         reply_markup=taxi_force_reply_markup(),
         parse_mode="HTML",
     )
@@ -2340,7 +2347,7 @@ async def price_city_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return menu_result
     context.user_data.setdefault("price_check", {})["city_from"] = update.message.text.strip()
     await update.message.reply_text(
-        "🏠 Введите адрес и дом для точки А (пример: Ленина, 26)",
+        "🧬 Введите адрес и дом для точки А (пример: Ленина, 26)",
         reply_markup=taxi_force_reply_markup(),
     )
     return WAIT_PRICE_ADDRESS_FROM
@@ -2352,7 +2359,7 @@ async def price_address_from(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return menu_result
     context.user_data.setdefault("price_check", {})["address_from"] = update.message.text.strip()
     await update.message.reply_text(
-        "🏙️ Введите город/посёлок для точки Б:",
+        "🧬 Введите город/посёлок для точки Б:",
         reply_markup=taxi_force_reply_markup(),
     )
     return WAIT_PRICE_CITY_TO
@@ -2364,7 +2371,7 @@ async def price_city_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return menu_result
     context.user_data.setdefault("price_check", {})["city_to"] = update.message.text.strip()
     await update.message.reply_text(
-        "🏠 Введите адрес и дом для точки Б (пример: Ленина, 26)",
+        "🧬 Введите адрес и дом для точки Б (пример: Ленина, 26)",
         reply_markup=taxi_force_reply_markup(),
     )
     return WAIT_PRICE_ADDRESS_TO
@@ -2377,7 +2384,7 @@ async def price_address_to(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data.setdefault("price_check", {})
     data["address_to"] = update.message.text.strip()
     await update.message.reply_text(
-        "🚘 Выберите тариф:",
+        "🐢 Выберите тариф:",
         reply_markup=price_tariff_keyboard(),
     )
     return WAIT_PRICE_TARIFF
@@ -2420,7 +2427,7 @@ async def price_tariff_selected(update: Update, context: ContextTypes.DEFAULT_TY
 
     if not price:
         await query.message.reply_text(
-            "😔 Не удалось найти цену по указанным адресам.\n"
+            "🧟 Не удалось найти цену по указанным адресам.\n"
             "Проверьте написание или добавьте город.",
             reply_markup=main_menu_keyboard(query.from_user.id),
         )
@@ -2430,7 +2437,7 @@ async def price_tariff_selected(update: Update, context: ContextTypes.DEFAULT_TY
 
     if price_value is None:
         await query.message.reply_text(
-            "😔 Не удалось распознать цену. Попробуйте уточнить адреса.",
+            "🧟 Не удалось распознать цену. Попробуйте уточнить адреса.",
             reply_markup=main_menu_keyboard(query.from_user.id),
         )
         return ConversationHandler.END
@@ -2443,12 +2450,12 @@ async def price_tariff_selected(update: Update, context: ContextTypes.DEFAULT_TY
 
     await query.message.reply_text(
         (
-            "✅ <b>Цена найдена</b>\n\n"
-            f"🚩 <b>Откуда:</b> {full_from}\n"
-            f"🎯 <b>Куда:</b> {full_to}\n"
-            f"🚘 <b>Тариф:</b> {data.get('price_label') or price_class}\n\n"
-            f"💰 <b>Цена в приложении:</b> <s>~{price_value:.2f} ₽</s>\n"
-            f"💸 <b>Наша цена:</b> ~{our_price:.2f} ₽"
+            "🟢 <b>Цена найдена</b>\n\n"
+            f"🧬 <b>Откуда:</b> {full_from}\n"
+            f"🧬 <b>Куда:</b> {full_to}\n"
+            f"🐢 <b>Тариф:</b> {data.get('price_label') or price_class}\n\n"
+            f"🟩 <b>Цена в приложении:</b> <s>~{price_value:.2f} ₽</s>\n"
+            f"🟩 <b>Наша цена:</b> ~{our_price:.2f} ₽"
         ),
         reply_markup=price_decision_keyboard(),
         parse_mode="HTML",
@@ -2471,7 +2478,7 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     if not is_ordering_enabled():
         await query.message.reply_text(
-            "🔔 Заказ такси временно недоступен. Бот на технических работах, попробуйте позже.",
+            "🧿 Заказ такси временно недоступен. Бот на технических работах, попробуйте позже.",
             reply_markup=main_menu_keyboard(query.from_user.id),
         )
         return ConversationHandler.END
@@ -2479,7 +2486,7 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data.clear()
     context.user_data['order_data'] = {}
     if data == "order_screenshot":
-        await query.edit_message_text("🖼️ Пришлите скриншот маршрута 🎀")
+        await query.edit_message_text("🧪 Пришлите скриншот маршрута 🧪")
         return WAIT_SCREENSHOT
     elif data == "order_text":
         context.user_data['order_type'] = "text"
@@ -2488,9 +2495,9 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             context.user_data.setdefault('order_data', {})['city'] = saved_user.get("city")
             await ask_address_from(query, context)
             return WAIT_ADDRESS_FROM
-        await query.edit_message_text("🌆 Укажи город для поездки (Такси от Майка)")
+        await query.edit_message_text("🧬 Укажи город для поездки (Такси от Майка)")
         await query.message.reply_text(
-            "Напишите город отправления ✨",
+            "Напишите город отправления 🐍",
             reply_markup=taxi_force_reply_markup(),
         )
         return WAIT_CITY
@@ -2503,7 +2510,7 @@ async def order_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ---- Клавиатура "Пропустить" ----
 def skip_keyboard():
-    return ReplyKeyboardMarkup([[KeyboardButton("Пропустить 🎿")]], resize_keyboard=True)
+    return ReplyKeyboardMarkup([[KeyboardButton("Пропустить 🧪")]], resize_keyboard=True)
 
 
 def order_confirmation_keyboard():
@@ -2527,14 +2534,14 @@ def price_tariff_keyboard():
         [InlineKeyboardButton(label, callback_data=f"price_tariff_{code}")]
         for code, label in PRICE_TARIFFS
     ]
-    buttons.append([InlineKeyboardButton("🏠 В меню", callback_data="price_order_cancel")])
+    buttons.append([InlineKeyboardButton("🧬 В меню", callback_data="price_order_cancel")])
     return InlineKeyboardMarkup(buttons)
 
 
 def price_decision_keyboard():
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🏠 Возврат в меню", callback_data="price_back")],
+            [InlineKeyboardButton("🧬 Возврат в меню", callback_data="price_back")],
         ]
     )
 
@@ -2998,42 +3005,42 @@ async def ensure_text_order_price(order_data: dict) -> None:
 
 
 def build_order_preview_text(order_data, order_type):
-    parts = ["🎄✨ Проверьте данные заказа:"]
-    parts.append(f"📸 Формат: {'🖼️ Скриншот' if order_type == 'screenshot' else '📝 Текст'}")
+    parts = ["🐲🐍 Проверьте данные заказа:"]
+    parts.append(f"🧪 Формат: {'🧪 Скриншот' if order_type == 'screenshot' else '🧬 Текст'}")
 
     if order_data.get('city'):
-        parts.append(f"🏙️ Город: {order_data['city']}")
+        parts.append(f"🧬 Город: {order_data['city']}")
     if order_data.get('address_from'):
-        parts.append(f"🎁 Откуда: {order_data['address_from']}")
+        parts.append(f"🧪 Откуда: {order_data['address_from']}")
     if order_data.get('address_to'):
-        parts.append(f"🎁 Куда: {order_data['address_to']}")
+        parts.append(f"🧪 Куда: {order_data['address_to']}")
     if order_data.get('address_extra'):
-        parts.append(f"🧭 Доп. адрес: {order_data['address_extra']}")
+        parts.append(f"🧬 Доп. адрес: {order_data['address_extra']}")
     if order_data.get('tariff'):
-        parts.append(f"⛄️ Тариф: {order_data['tariff']}")
+        parts.append(f"🧟 Тариф: {order_data['tariff']}")
     if order_data.get('child_seat'):
-        parts.append(f"🛷 Детское кресло: {order_data['child_seat']}")
+        parts.append(f"🦖 Детское кресло: {order_data['child_seat']}")
     if order_data.get('child_seat_type'):
-        parts.append(f"❄️ Тип кресла: {order_data['child_seat_type']}")
+        parts.append(f"🐸 Тип кресла: {order_data['child_seat_type']}")
     if order_data.get('wishes'):
         wishes = order_data.get('wishes')
         wishes_text = ", ".join(wishes) if isinstance(wishes, (list, tuple, set)) else wishes
-        parts.append(f"🎇 Пожелания: {wishes_text}")
+        parts.append(f"👾 Пожелания: {wishes_text}")
 
     comment = order_data.get('comment')
-    parts.append(f"📝 Комментарий: {comment if comment else 'не указан'}")
+    parts.append(f"🧬 Комментарий: {comment if comment else 'не указан'}")
 
     if order_data.get("app_price") is not None and order_data.get("our_price") is not None:
         price_label = order_data.get("price_label") or order_data.get("tariff")
         if price_label:
-            parts.append(f"🚘 Тариф для цены: {price_label}")
-        parts.append(f"💰 Цена в приложении: ~{order_data['app_price']:.2f} ₽")
-        parts.append(f"🎁 Наша цена: {order_data['our_price']:.2f} ₽")
+            parts.append(f"🐢 Тариф для цены: {price_label}")
+        parts.append(f"🟩 Цена в приложении: ~{order_data['app_price']:.2f} ₽")
+        parts.append(f"🧪 Наша цена: {order_data['our_price']:.2f} ₽")
 
     if order_type == "screenshot":
-        parts.append("🖼️ Скриншот: прикреплён")
+        parts.append("🧪 Скриншот: прикреплён")
 
-    parts.append("\n✨ Если всё верно — отправляйте заказ!")
+    parts.append("\n🐍 Если всё верно — отправляйте заказ!")
 
     return "\n".join(parts)
 
@@ -3064,7 +3071,7 @@ async def screenshot_receive(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data['order_type'] = "screenshot"
     context.user_data['order_data'] = {}
 
-    await update.message.reply_text("Выберите тариф 🛷", reply_markup=tariff_keyboard())
+    await update.message.reply_text("Выберите тариф 🦖", reply_markup=tariff_keyboard())
     return WAIT_TARIFF
 
 # ---- Текстовый заказ: последовательность шагов ----
@@ -3073,10 +3080,10 @@ async def ask_address_from(update_or_query, context):
     favorites = get_favorite_addresses(user_id)
     target = update_or_query.message
     if favorites:
-        await target.reply_text("Адрес откуда ❄️", reply_markup=favorites_select_keyboard(favorites, "from"))
+        await target.reply_text("Адрес откуда 🐸", reply_markup=favorites_select_keyboard(favorites, "from"))
     else:
         await target.reply_text(
-            "🧭 Введите адрес отправления (Такси от Майка)",
+            "🧬 Введите адрес отправления (Такси от Майка)",
             reply_markup=taxi_force_reply_markup(),
         )
 
@@ -3086,10 +3093,10 @@ async def ask_address_to(update_or_query, context):
     favorites = get_favorite_addresses(user_id)
     target = update_or_query.message
     if favorites:
-        await target.reply_text("Адрес куда ❄️", reply_markup=favorites_select_keyboard(favorites, "to"))
+        await target.reply_text("Адрес куда 🐸", reply_markup=favorites_select_keyboard(favorites, "to"))
     else:
         await target.reply_text(
-            "📍 Введите адрес назначения (Такси от Майка)",
+            "🧬 Введите адрес назначения (Такси от Майка)",
             reply_markup=taxi_force_reply_markup(),
         )
 
@@ -3099,10 +3106,10 @@ async def ask_address_third(update_or_query, context):
     favorites = get_favorite_addresses(user_id)
     target = update_or_query.message
     if favorites:
-        await target.reply_text("Введите третий адрес 🧭❄️", reply_markup=favorites_select_keyboard(favorites, "third"))
+        await target.reply_text("Введите третий адрес 🧬🐸", reply_markup=favorites_select_keyboard(favorites, "third"))
     else:
         await target.reply_text(
-            "Введите дополнительный адрес 🧭 (Такси от Майка)",
+            "Введите дополнительный адрес 🧬 (Такси от Майка)",
             reply_markup=taxi_force_reply_markup(),
         )
 
@@ -3158,7 +3165,7 @@ async def ask_tariff(update_or_query, context):
         target = update_or_query.message
     else:
         target = update_or_query.message
-    await target.reply_text("Выберите тариф 🛷", reply_markup=tariff_keyboard())
+    await target.reply_text("Выберите тариф 🦖", reply_markup=tariff_keyboard())
 
 
 async def favorite_address_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3170,9 +3177,9 @@ async def favorite_address_callback(update: Update, context: ContextTypes.DEFAUL
 
     if payload == "manual":
         prompt = {
-            "from": "Введите адрес откуда ❄️ (Такси от Майка)",
-            "to": "Введите адрес куда ❄️ (Такси от Майка)",
-            "third": "Введите третий адрес 🧭❄️ (Такси от Майка)",
+            "from": "Введите адрес откуда 🐸 (Такси от Майка)",
+            "to": "Введите адрес куда 🐸 (Такси от Майка)",
+            "third": "Введите третий адрес 🧬🐸 (Такси от Майка)",
         }.get(stage, "Введите адрес")
         await query.message.reply_text(prompt, reply_markup=taxi_force_reply_markup())
         return {
@@ -3209,7 +3216,7 @@ async def text_comment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if menu_result is not None:
         return menu_result
     raw_comment = (update.message.text or "").strip()
-    comment = None if raw_comment.lower() == "пропустить 🎿" or raw_comment == "" else raw_comment
+    comment = None if raw_comment.lower() == "пропустить 🧪" or raw_comment == "" else raw_comment
 
     order_type = context.user_data.get('order_type')
     data = context.user_data.get('order_data', {})
@@ -3303,7 +3310,7 @@ async def order_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     increment_orders_count(query.from_user.id)
     await query.message.reply_text(
-        f"🎉 Ваш заказ №{order_id} создан",
+        f"👾 Ваш заказ №{order_id} создан",
         reply_markup=main_menu_keyboard(query.from_user.id),
     )
     await notify_admins(context, order_id)
@@ -3371,7 +3378,7 @@ async def additional_selected(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data in {"additional_done", "additional_skip"}:
         await query.message.reply_text(
-            "Добавьте комментарий для админа или нажмите «Пропустить 🎿»",
+            "Добавьте комментарий для админа или нажмите «Пропустить 🧪»",
             reply_markup=skip_keyboard(),
         )
         return WAIT_COMMENT
@@ -3508,7 +3515,7 @@ def replacement_info_text(info):
     user = get_user(info.get("tg_id")) if info.get("tg_id") else None
     username = user.get("username") if user else None
     parts = [
-        f"✨ Заказ для подмены #{info['id']}",
+        f"🐍 Заказ для подмены #{info['id']}",
         f"Создан: {info.get('created_at') or '—'}",
         f"Заказчик: @{username or 'не указан'} (ID: {info.get('tg_id') or '—'})",
         f"OrderID: {info.get('order_number') or '—'}",
@@ -3528,12 +3535,12 @@ async def notify_replacement_done(info, context):
     related_order = get_order(info.get("order_id")) if info.get("order_id") else None
     order_bot = get_order_bot(related_order)
     text = (
-        "✨ Поездка успешно завершена!\n\n"
+        "🐍 Поездка успешно завершена!\n\n"
         "Спасибо, что выбрали нас.\n"
-        "🎺 Канал: @TaxiFromMike\n"
-        "🧑‍🎄‍🎄 Админ: @TakeMaxist\n\n"
+        "🐲 Канал: @TaxiFromMike\n"
+        "🧟‍🐲‍🐲 Админ: @TakeMaxist\n\n"
         "Нажмите /start, чтобы вернуться в главное меню.\n"
-        "Поделитесь, пожалуйста, отзывом в чате — нам важно ваше мнение! 🔔"
+        "Поделитесь, пожалуйста, отзывом в чате — нам важно ваше мнение! 🧿"
     )
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Оставить отзыв", url="https://t.me/+z_S1iZMVW-ZmMzBi")]
@@ -3551,11 +3558,11 @@ async def notify_admins_payment(context: ContextTypes.DEFAULT_TYPE, payment_id: 
     user = get_user(payment.get("tg_id")) or {}
     method = payment.get("method")
     method_titles = {
-        "transfer": "🎁 Карта",
-        "sbp": "🎁 СБП",
-        "ltc": "🪙🎄 Litecoin",
-        "usdt_trc20": "🎁 USDT (TRC20)",
-        "usdt_trx": "🎁 USDT (TRX)",
+        "transfer": "🧪 Карта",
+        "sbp": "🧪 СБП",
+        "ltc": "🟩🐲 Litecoin",
+        "usdt_trc20": "🧪 USDT (TRC20)",
+        "usdt_trx": "🧪 USDT (TRX)",
     }
     original_amount = payment.get("original_amount")
     original_currency = payment.get("original_currency") or "RUB"
@@ -3567,7 +3574,7 @@ async def notify_admins_payment(context: ContextTypes.DEFAULT_TYPE, payment_id: 
         else "не указана"
     )
     parts = [
-        "🎁 Новая оплата",
+        "🧪 Новая оплата",
         f"Пользователь: @{user.get('username') or 'не указан'} (ID: {payment.get('tg_id')})",
         "Тип: Оплата заказа",
         f"Метод: {method_titles.get(method, method)}",
@@ -3575,7 +3582,7 @@ async def notify_admins_payment(context: ContextTypes.DEFAULT_TYPE, payment_id: 
         f"Реквизиты: {payment.get('requisites')}",
     ]
     if original_amount and display_currency != original_currency:
-        parts.append(f"🎁 Эквивалент: {original_amount:.2f} {original_currency}")
+        parts.append(f"🧪 Эквивалент: {original_amount:.2f} {original_currency}")
     if payment.get("comment_code"):
         parts.append(f"Комментарий: {payment.get('comment_code')}")
     if payment.get("order_id"):
@@ -3583,8 +3590,8 @@ async def notify_admins_payment(context: ContextTypes.DEFAULT_TYPE, payment_id: 
 
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Зачислить 🎉", callback_data=f"payapprove_{payment_id}")],
-            [InlineKeyboardButton("Нет 🎄🚫", callback_data=f"paydecline_{payment_id}")],
+            [InlineKeyboardButton("Зачислить 👾", callback_data=f"payapprove_{payment_id}")],
+            [InlineKeyboardButton("Нет 🐲🧪", callback_data=f"paydecline_{payment_id}")],
         ]
     )
     for admin_id in ADMIN_IDS:
@@ -3613,7 +3620,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
     if query.from_user.id not in ADMIN_IDS:
-        await query.answer("🎄🚫 Нет доступа", show_alert=True)
+        await query.answer("🐲🧪 Нет доступа", show_alert=True)
         return ConversationHandler.END
     # Взял в работу
     if data.startswith("take_"):
@@ -3622,7 +3629,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_bot = get_order_bot(order)
 
         if order.get("status") != "pending":
-            await query.answer("🎄🚫 Этот заказ уже в работе или отменён", show_alert=True)
+            await query.answer("🐲🧪 Этот заказ уже в работе или отменён", show_alert=True)
             return
 
         update_order_status(order_id, "in_progress")
@@ -3631,16 +3638,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = order.get("tg_id")
         operator_label = format_operator_label(query.from_user.id, query.from_user.username)
         status_frames = [
-            f"🚕 Уже взяли в работу ваш заказ\n{build_operator_signature(query.from_user.id, query.from_user.username)}",
-            f"🛠️ Трудимся над вашим заказом\n{build_operator_signature(query.from_user.id, query.from_user.username)}",
-            f"🚦 Скоро начнём поиск такси\n{build_operator_signature(query.from_user.id, query.from_user.username)}",
+            f"🐊 Уже взяли в работу ваш заказ\n{build_operator_signature(query.from_user.id, query.from_user.username)}",
+            f"🧪 Трудимся над вашим заказом\n{build_operator_signature(query.from_user.id, query.from_user.username)}",
+            f"🟩 Скоро начнём поиск такси\n{build_operator_signature(query.from_user.id, query.from_user.username)}",
         ]
         status_message = await order_bot.send_message(user_id, status_frames[0])
         context.application.create_task(
             animate_status_message(status_message, status_frames)
         )
 
-        notify_text = f"🔔 Админ {operator_label} взял заказ №{order_id} в работу."
+        notify_text = f"🧿 Админ {operator_label} взял заказ №{order_id} в работу."
         for admin_id in ADMIN_IDS:
             if admin_id == query.from_user.id:
                 continue
@@ -3658,11 +3665,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("reject_"):
         order_id = int(data.split("_")[1])
         update_order_status(order_id, "cancelled")
-        await edit_admin_message(query, "Заказ отклонён 🎄🚫")
+        await edit_admin_message(query, "Заказ отклонён 🐲🧪")
         order = get_order(order_id)
         order_bot = get_order_bot(order)
         user_id = order.get("tg_id")
-        await order_bot.send_message(user_id, f"Ваш заказ №{order_id} отклонён ❄️")
+        await order_bot.send_message(user_id, f"Ваш заказ №{order_id} отклонён 🐸")
     # Поиск
     elif data.startswith("search_"):
         order_id = int(data.split("_")[1])
@@ -3672,9 +3679,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_bot = get_order_bot(order)
         user_id = order.get("tg_id")
         search_frames = [
-            "🔍 Поиск машины",
-            "🚗 Ищем вам машину",
-            "🚕 Поиск такси",
+            "🧬 Поиск машины",
+            "🦎 Ищем вам машину",
+            "🐊 Поиск такси",
         ]
         search_message = await order_bot.send_message(user_id, search_frames[0])
         context.application.create_task(
@@ -3702,9 +3709,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tg_id = order.get("tg_id")
         operator_signature = build_operator_signature(query.from_user.id, query.from_user.username)
         found_frames = [
-            f"✅ Машина успешно найдена\n{operator_signature}",
-            f"📨 Сейчас отправим вам ссылку на машину\n{operator_signature}",
-            f"🛣️ Машина едет к вам\n{operator_signature}",
+            f"🟢 Машина успешно найдена\n{operator_signature}",
+            f"🧪 Сейчас отправим вам ссылку на машину\n{operator_signature}",
+            f"🟩 Машина едет к вам\n{operator_signature}",
         ]
         found_message = await order_bot.send_message(tg_id, found_frames[0])
         context.application.create_task(
@@ -3735,7 +3742,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason_text = reason_map.get(reason_code, "по техническим причинам")
 
         update_order_status(order_id, "cancelled")
-        await edit_admin_message(query, f"Заказ №{order_id} отменён ❄️")
+        await edit_admin_message(query, f"Заказ №{order_id} отменён 🐸")
         order_bot = get_order_bot(order)
         user_id = order.get("tg_id")
         notification = f"Заказ №{order_id} удалён, так как {reason_text}."
@@ -3760,7 +3767,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("sendphoto_"):
         order_id = int(data.split("_")[1])
         context.user_data['order_id'] = order_id
-        await query.message.reply_text("📷 Пришлите фото для заказчика:")
+        await query.message.reply_text("🧪 Пришлите фото для заказчика:")
         return WAIT_ADMIN_PHOTO
     elif data.startswith("pay_card_"):
         order_id = int(data.split("_")[2])
@@ -3772,11 +3779,15 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_payment_menu(order, order_bot)
         promo_discount = float(order.get("promo_discount") or 0)
         promo_code = order.get("promo_code")
-        discount_line = (
-            f" (скидка {promo_discount:.2f} ₽ по промокоду {promo_code})"
-            if promo_discount
-            else ""
-        )
+        free_ride = bool(order.get("free_ride"))
+        if free_ride:
+            discount_line = " (бесплатная поездка: каждая 15-я до 1000 ₽)"
+        else:
+            discount_line = (
+                f" (скидка {promo_discount:.2f} ₽ по промокоду {promo_code})"
+                if promo_discount
+                else ""
+            )
         await query.message.reply_text(f"Меню оплаты отправлено клиенту{discount_line}")
     elif data.startswith("replacement_offer_add_"):
         order_id = int(data.rsplit("_", 1)[1])
@@ -3808,8 +3819,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(
             replacement_info_text(info),
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎄 Назад", callback_data="replacement_back")],
-                [InlineKeyboardButton("Завершить заказ 🎉", callback_data=f"replacement_finish_{info_id}")],
+                [InlineKeyboardButton("🐲 Назад", callback_data="replacement_back")],
+                [InlineKeyboardButton("Завершить заказ 👾", callback_data=f"replacement_finish_{info_id}")],
             ]),
         )
     elif data.startswith("replacement_field_"):
@@ -3848,11 +3859,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await refresh_all_users(query.message, context)
         return ConversationHandler.END
     elif data == "admin_promo":
-        await query.message.reply_text("🎁 Введите количество активаций промокода:")
+        await query.message.reply_text("🧪 Введите количество активаций промокода:")
         return WAIT_PROMO_ACTIVATIONS
     elif data == "admin_all_bots":
         await query.message.reply_text(
-            "📡 Подключённые боты по владельцам:", reply_markup=admins_bots_keyboard()
+            "🧬 Подключённые боты по владельцам:", reply_markup=admins_bots_keyboard()
         )
         return ConversationHandler.END
     elif data == "admin_franchise_db":
@@ -3863,22 +3874,22 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
         ensure_all_franchise_tables()
         total_users = 0
-        lines = ["🗂️ Статус БД франшизы:"]
+        lines = ["🧬 Статус БД франшизы:"]
         for bot in connected_bots:
             bot_id = bot.get("id")
             title = bot.get("title") or "Без названия"
             if not bot_id:
-                lines.append(f"🤖 {title}: не удалось определить ID")
+                lines.append(f"👾 {title}: не удалось определить ID")
                 continue
             try:
                 count = count_franchise_users(bot_id)
             except Exception as e:
                 logger.error("Не удалось подсчитать пользователей для бота %s: %s", bot_id, e)
-                lines.append(f"🤖 {title}: ошибка подсчёта пользователей")
+                lines.append(f"👾 {title}: ошибка подсчёта пользователей")
                 continue
             total_users += count
-            lines.append(f"🤖 {title}: {count} пользователей в отдельной таблице {franchise_table_name(bot_id)}")
-        lines.append(f"🧾 Итого пользователей во франшизе: {total_users}")
+            lines.append(f"👾 {title}: {count} пользователей в отдельной таблице {franchise_table_name(bot_id)}")
+        lines.append(f"🧫 Итого пользователей во франшизе: {total_users}")
         await query.message.reply_text("\n".join(lines), reply_markup=admin_panel_keyboard())
         return ConversationHandler.END
     elif data == "admin_users_count":
@@ -3887,7 +3898,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         seen_tokens = set()
         total_users = 0
         primary_count = count_bot_users(PRIMARY_BOT_TOKEN)
-        lines.append(f"👑 Основной бот: {primary_count} пользователей")
+        lines.append(f"🐲 Основной бот: {primary_count} пользователей")
         total_users += primary_count
         for bot in bots:
             token = bot.get("token")
@@ -3897,7 +3908,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             count = count_bot_users(token)
             total_users += count
             title = bot.get("title") or "Без названия"
-            lines.append(f"🤖 {title}: {count} пользователей")
+            lines.append(f"👾 {title}: {count} пользователей")
         lines.append(f"Итого по всем: {total_users}")
         await query.message.reply_text("\n".join(lines), reply_markup=admin_panel_keyboard())
         return ConversationHandler.END
@@ -3953,7 +3964,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 logger.warning("Не удалось уведомить владельца о сбросе начислений")
         bots = list_user_bots(owner_id) if owner_id else []
-        summary_lines = [f"❄️ Начисления для бота {bot_title} сброшены до 0 ₽"]
+        summary_lines = [f"🐸 Начисления для бота {bot_title} сброшены до 0 ₽"]
         if bots:
             summary_lines.append(build_owner_summary(owner_id, bots))
         reply_markup = admin_owner_keyboard(owner_id, bots) if bots else admin_panel_keyboard()
@@ -3976,23 +3987,23 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return WAIT_BOT_BALANCE
     elif data == "admin_broadcast":
         await query.message.reply_text(
-            "📣 Пришлите текст или фото для рассылки по базе (Такси от Майка)",
+            "🧿 Пришлите текст или фото для рассылки по базе (Такси от Майка)",
             reply_markup=taxi_force_reply_markup(),
         )
         return WAIT_ADMIN_BROADCAST
     elif data == "admin_podmena_clear":
         clear_podmena_entries()
         await query.message.reply_text(
-            "🧹 База подмен очищена.", reply_markup=admin_panel_keyboard()
+            "🧪 База подмен очищена.", reply_markup=admin_panel_keyboard()
         )
         return ConversationHandler.END
     elif data == "admin_toggle":
         new_value = "0" if is_ordering_enabled() else "1"
         set_setting("ordering_enabled", new_value)
-        status = "🧊 Приём заказов остановлен" if new_value == "0" else "🎉 Приём заказов возобновлён"
+        status = "🟩 Приём заказов остановлен" if new_value == "0" else "👾 Приём заказов возобновлён"
         await query.message.reply_text(status, reply_markup=admin_panel_keyboard())
     elif data == "admin_status":
-        status = "🎉 Приём заказов включён" if is_ordering_enabled() else "🧊 Приём заказов выключен"
+        status = "👾 Приём заказов включён" if is_ordering_enabled() else "🟩 Приём заказов выключен"
         await query.message.reply_text(status, reply_markup=admin_panel_keyboard())
     elif data.startswith("payapprove_"):
         payment_id = int(data.rsplit("_", 1)[1])
@@ -4007,7 +4018,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if order_id:
             update_order_status(order_id, "paid")
         update_payment(payment_id, status="success")
-        await order_bot.send_message(user_id, "🎉 Оплата за поездку подтверждена! Спасибо!")
+        await order_bot.send_message(user_id, "👾 Оплата за поездку подтверждена! Спасибо!")
         await query.message.reply_text("Оплата отмечена как успешная")
         return ConversationHandler.END
     elif data.startswith("paydecline_"):
@@ -4022,11 +4033,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             crypto_methods = {"ltc", "usdt_trc20", "usdt_trx"}
             is_crypto = method in crypto_methods
             request_text = (
-                "❄️⚠️ Оплата не найдена. Пришлите, пожалуйста, ссылку на транзакцию или свяжитесь с оператором."
+                "🐸🟩 Оплата не найдена. Пришлите, пожалуйста, ссылку на транзакцию или свяжитесь с оператором."
                 if is_crypto
-                else "❄️⚠️ Оплата не найдена. Пришлите, пожалуйста, чек в ответном сообщении или свяжитесь с оператором."
+                else "🐸🟩 Оплата не найдена. Пришлите, пожалуйста, чек в ответном сообщении или свяжитесь с оператором."
             )
-            button_label = "✨ Ссылка" if is_crypto else "🧾🎄 Чек"
+            button_label = "🐍 Ссылка" if is_crypto else "🧫🐲 Чек"
             await order_bot.send_message(
                 payment.get("tg_id"),
                 request_text,
@@ -4047,7 +4058,7 @@ async def admin_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     order_bot = get_order_bot(order)
     tg_id = order.get("tg_id")
     operator_signature = build_operator_signature(update.effective_user.id, update.effective_user.username)
-    await order_bot.send_message(tg_id, f"🔔 Сообщение от администратора:\n{text}\n\n{operator_signature}")
+    await order_bot.send_message(tg_id, f"🧿 Сообщение от администратора:\n{text}\n\n{operator_signature}")
     await update.message.reply_text("Сообщение отправлено. Теперь введите сумму заказа (₽):")
     return WAIT_ADMIN_SUM
 
@@ -4060,7 +4071,7 @@ async def admin_send_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     if not update.message.photo:
-        await update.message.reply_text("📷 Пришлите фото, чтобы отправить заказчику.")
+        await update.message.reply_text("🧪 Пришлите фото, чтобы отправить заказчику.")
         return WAIT_ADMIN_PHOTO
 
     order_bot = get_order_bot(order)
@@ -4104,7 +4115,7 @@ async def admin_replacement_save(update: Update, context: ContextTypes.DEFAULT_T
     if not saved:
         fallback = f"{info.get('external_id', '-')}/{info.get('order_number', '-')}/{info.get('card_x', '-')}/{info.get('token2', '-')}"
         await update.message.reply_text(
-            "❄️⚠️ Не удалось сохранить подмену во вторую БД. Данные: " + fallback,
+            "🐸🟩 Не удалось сохранить подмену во вторую БД. Данные: " + fallback,
             reply_markup=replacement_fields_keyboard(info),
         )
         return ConversationHandler.END
@@ -4122,12 +4133,12 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("payment_paid_"):
         payment_id = int(data.rsplit("_", 1)[1])
         update_payment(payment_id, status="waiting_admin")
-        await query.message.reply_text("🎉 Заявка на оплату отправлена администратору")
+        await query.message.reply_text("👾 Заявка на оплату отправлена администратору")
         await notify_admins_payment(context, payment_id)
     elif data.startswith("payment_check_"):
         payment_id = int(data.rsplit("_", 1)[1])
         update_payment(payment_id, status="waiting_admin")
-        await query.message.reply_text("✨ Отправили данные администратору, ждём подтверждения")
+        await query.message.reply_text("🐍 Отправили данные администратору, ждём подтверждения")
         await notify_admins_payment(context, payment_id)
     elif data.startswith("payment_cancel_"):
         payment_id = int(data.rsplit("_", 1)[1])
@@ -4176,8 +4187,8 @@ async def payment_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         caption_lines.append(f"Реквизиты: {payment.get('requisites')}")
     caption = "\n".join(caption_lines)
     admin_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Зачислить 🎉", callback_data=f"payapprove_{payment_id}")],
-        [InlineKeyboardButton("Нет 🎄🚫", callback_data=f"paydecline_{payment_id}")],
+        [InlineKeyboardButton("Зачислить 👾", callback_data=f"payapprove_{payment_id}")],
+        [InlineKeyboardButton("Нет 🐲🧪", callback_data=f"paydecline_{payment_id}")],
     ])
     forwarded = False
     for admin_id in ADMIN_IDS:
@@ -4185,7 +4196,7 @@ async def payment_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if receipt_kind == "link" and update.message.text:
                 await context.bot.send_message(
                     admin_id,
-                    caption + f"\n✨ Ссылка на транзакцию: {update.message.text}",
+                    caption + f"\n🐍 Ссылка на транзакцию: {update.message.text}",
                     reply_markup=admin_keyboard,
                 )
                 forwarded = True
@@ -4198,7 +4209,7 @@ async def payment_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_document(admin_id, document=doc.file_id, caption=caption, reply_markup=admin_keyboard)
                 forwarded = True
             elif update.message.text:
-                await context.bot.send_message(admin_id, caption + f"\n🕯️ Комментарий: {update.message.text}", reply_markup=admin_keyboard)
+                await context.bot.send_message(admin_id, caption + f"\n🧪 Комментарий: {update.message.text}", reply_markup=admin_keyboard)
                 forwarded = True
         except Exception as e:
             logger.error(f"Не удалось переслать чек админу {admin_id}: {e}")
@@ -4215,7 +4226,7 @@ async def admin_orders_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         target_id = int(update.message.text.strip())
     except ValueError:
-        await update.message.reply_text("🎄🚫 Введите числовой Telegram ID")
+        await update.message.reply_text("🐲🧪 Введите числовой Telegram ID")
         return WAIT_ADMIN_ORDERS
 
     orders = get_user_orders(target_id, limit=5)
@@ -4223,7 +4234,7 @@ async def admin_orders_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("Заказы не найдены", reply_markup=admin_panel_keyboard())
         return ConversationHandler.END
 
-    lines = ["🎁 Последние заказы:"]
+    lines = ["🧪 Последние заказы:"]
     for order in orders:
         lines.append(
             f"№{order['id']} — {order['status']} — {order['amount'] or 0:.2f} ₽ (база {order['base_amount'] or 0:.2f} ₽) — {order['created_at']}"
@@ -4256,12 +4267,12 @@ async def refresh_all_users(target, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Не удалось обновить пользователя {uid}: {e}")
 
     lines = [
-        "🔔 Проверка завершена:",
-        f"🧑‍🎄‍🎄 Проверено пользователей: {checked}",
-        f"🖊️❄️ Обновлено username: {updated}",
+        "🧿 Проверка завершена:",
+        f"🧟‍🐲‍🐲 Проверено пользователей: {checked}",
+        f"🧬🐸 Обновлено username: {updated}",
     ]
     if failed:
-        lines.append("❄️⚠️ Не удалось обновить: " + ", ".join(map(str, failed)))
+        lines.append("🐸🟩 Не удалось обновить: " + ", ".join(map(str, failed)))
 
     await target.reply_text("\n".join(lines), reply_markup=admin_panel_keyboard())
 
@@ -4269,7 +4280,7 @@ async def refresh_all_users(target, context: ContextTypes.DEFAULT_TYPE):
 async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.effective_user.id
     if sender_id not in ADMIN_IDS:
-        await update.message.reply_text("🚫 Только администраторы могут рассылать сообщения.")
+        await update.message.reply_text("🧪 Только администраторы могут рассылать сообщения.")
         return ConversationHandler.END
 
     msg = update.message
@@ -4278,7 +4289,7 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not (content_text or photo):
         await msg.reply_text(
-            "⚠️ Пришлите текст или фото для рассылки (Такси от Майка)",
+            "🟩 Пришлите текст или фото для рассылки (Такси от Майка)",
             reply_markup=taxi_force_reply_markup(),
         )
         return WAIT_ADMIN_BROADCAST
@@ -4297,7 +4308,7 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as exc:
             logger.error("Не удалось скачать фото для рассылки: %s", exc)
             await status_message.edit_text(
-                "⚠️ Не удалось скачать фото для рассылки.",
+                "🟩 Не удалось скачать фото для рассылки.",
                 reply_markup=admin_panel_keyboard(),
             )
             return ConversationHandler.END
@@ -4327,7 +4338,7 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     image = InputFile(photo_bytes, filename="broadcast.jpg")
                     await bot_instance.send_photo(uid, photo=image, caption=content_text)
                 else:
-                    await bot_instance.send_message(uid, f"🎺 Такси от Майка:\n{content_text}")
+                    await bot_instance.send_message(uid, f"🐲 Такси от Майка:\n{content_text}")
                 sent += 1
             except Forbidden:
                 blocked += 1
@@ -4345,10 +4356,10 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await asyncio.sleep(0.5)
 
     summary_lines = [
-        "📣 Рассылка завершена",
-        f"✅ Доставлено: {sent}",
-        f"🚫 Блок: {blocked}",
-        f"⚠️ Ошибок: {failed}",
+        "🧿 Рассылка завершена",
+        f"🟢 Доставлено: {sent}",
+        f"🧪 Блок: {blocked}",
+        f"🟩 Ошибок: {failed}",
     ]
 
     await status_message.edit_text(
@@ -4364,11 +4375,11 @@ async def admin_promo_activations(update: Update, context: ContextTypes.DEFAULT_
         if activations <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("🎄🚫 Введите количество активаций целым числом больше 0.")
+        await update.message.reply_text("🐲🧪 Введите количество активаций целым числом больше 0.")
         return WAIT_PROMO_ACTIVATIONS
 
     context.user_data["promo_activations"] = activations
-    await update.message.reply_text("🎁 Введите сумму скидки (₽):")
+    await update.message.reply_text("🧪 Введите сумму скидки (₽):")
     return WAIT_PROMO_DISCOUNT
 
 
@@ -4379,7 +4390,7 @@ async def admin_promo_discount(update: Update, context: ContextTypes.DEFAULT_TYP
         if discount <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("🎄🚫 Введите сумму скидки числом больше 0.")
+        await update.message.reply_text("🐲🧪 Введите сумму скидки числом больше 0.")
         return WAIT_PROMO_DISCOUNT
 
     activations = context.user_data.pop("promo_activations", None)
@@ -4389,9 +4400,9 @@ async def admin_promo_discount(update: Update, context: ContextTypes.DEFAULT_TYP
 
     code = create_promo_code(discount, activations)
     await update.message.reply_text(
-        f"🎉 Промокод создан: {code}\n"
-        f"🎁 Скидка: {discount:.2f} ₽\n"
-        f"🔢 Активаций: {activations}",
+        f"👾 Промокод создан: {code}\n"
+        f"🧪 Скидка: {discount:.2f} ₽\n"
+        f"🧬 Активаций: {activations}",
         reply_markup=admin_panel_keyboard(),
     )
     return ConversationHandler.END
@@ -4410,7 +4421,7 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amount <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("🎄🚫 Некорректная сумма, введите число >0")
+        await update.message.reply_text("🐲🧪 Некорректная сумма, введите число >0")
         return WAIT_ADMIN_SUM
 
     order = get_order(order_id)
@@ -4418,17 +4429,20 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(tg_id)
     coefficient = user["coefficient"] if user else 1
     total = round(amount * coefficient, 2)
+    orders_count = int((user or {}).get("orders_count") or 0)
+    is_free_ride = orders_count % 15 == 0 and total <= 1000
     promo_code, promo_discount = get_user_promo(tg_id)
     promo_discount = float(promo_discount or 0)
-    discounted_total = max(total - promo_discount, 0)
+    discounted_total = 0 if is_free_ride else max(total - promo_discount, 0)
 
     update_order_fields(
         order_id,
         status="car_found",
         amount=discounted_total,
         base_amount=amount,
-        promo_code=promo_code,
-        promo_discount=promo_discount,
+        promo_code=None if is_free_ride else promo_code,
+        promo_discount=0 if is_free_ride else promo_discount,
+        free_ride=1 if is_free_ride else 0,
     )
 
     updated_order = dict(order or {})
@@ -4437,13 +4451,14 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "id": order_id,
             "amount": discounted_total,
             "base_amount": amount,
-            "promo_code": promo_code,
-            "promo_discount": promo_discount,
+            "promo_code": None if is_free_ride else promo_code,
+            "promo_discount": 0 if is_free_ride else promo_discount,
+            "free_ride": 1 if is_free_ride else 0,
         }
     )
     order_bot = get_order_bot(order)
     await send_payment_menu(updated_order, order_bot)
-    if promo_code:
+    if promo_code and not is_free_ride:
         clear_user_promo(tg_id)
 
     referral_reward = 0
@@ -4454,7 +4469,7 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await primary_bot.send_message(
                     referrer_id,
-                    f"🎁 Вам начислено {referral_reward:.2f} ₽ за заказ друга №{order_id}. Спасибо, что приглашаете друзей!",
+                    f"🧪 Вам начислено {referral_reward:.2f} ₽ за заказ друга №{order_id}. Спасибо, что приглашаете друзей!",
                 )
             except Exception as e:
                 logger.warning("Не удалось уведомить реферера %s: %s", referrer_id, e)
@@ -4486,8 +4501,13 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         (
-            f"🎉 Сумма заказа сохранена. Итог для клиента: {discounted_total:.2f} ₽."
-            + (f" Скидка по промокоду {promo_code}: -{promo_discount:.2f} ₽." if promo_code else "")
+            f"👾 Сумма заказа сохранена. Итог для клиента: {discounted_total:.2f} ₽."
+            + (" Бесплатная поездка: каждая 15-я до 1000 ₽." if is_free_ride else "")
+            + (
+                f" Скидка по промокоду {promo_code}: -{promo_discount:.2f} ₽."
+                if promo_code and not is_free_ride
+                else ""
+            )
             + " Меню оплаты отправлено клиенту"
         ),
         reply_markup=payment_choice_keyboard(order_id),
@@ -4511,7 +4531,7 @@ async def admin_bot_balance_update(update: Update, context: ContextTypes.DEFAULT
         if value <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("🎄🚫 Некорректная сумма, введите число больше 0")
+        await update.message.reply_text("🐲🧪 Некорректная сумма, введите число больше 0")
         return WAIT_BOT_BALANCE
 
     bot_id = context.user_data.pop("bot_balance_bot_id", None)
@@ -4535,7 +4555,7 @@ async def admin_bot_balance_update(update: Update, context: ContextTypes.DEFAULT
     action_text = "добавлено" if action == "add" else "списано"
     title = bot.get("title") or "бот"
     await update.message.reply_text(
-        f"🎁 {action_text.capitalize()} {value:.2f} ₽. Новый баланс «{title}»: {new_value:.2f} ₽."
+        f"🧪 {action_text.capitalize()} {value:.2f} ₽. Новый баланс «{title}»: {new_value:.2f} ₽."
     )
 
     if owner_id:
@@ -4614,20 +4634,20 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_count=total_count or 0,
         )
         text = (
-            f"✨ <b>Статистика заказов</b>\n\n"
-            f"🎆️ Кол-во заказов за сутки: {summary['day_count']}\n"
-            f"🎆 Кол-во заказов за всё время: {summary['total_count']}\n\n"
-            f"🎁 Сумма заказов за сутки: {summary['day_sum']:.2f} ₽\n"
-            f"🎁 Сумма заказов за всё время: {summary['total_sum']:.2f} ₽\n\n"
-            f"🎉 Заработок за сутки: {summary['day_sum']:.2f} ₽\n"
-            f"🎁 Заработок за всё время: {summary['total_sum']:.2f} ₽"
+            f"🐍 <b>Статистика заказов</b>\n\n"
+            f"👾️ Кол-во заказов за сутки: {summary['day_count']}\n"
+            f"👾 Кол-во заказов за всё время: {summary['total_count']}\n\n"
+            f"🧪 Сумма заказов за сутки: {summary['day_sum']:.2f} ₽\n"
+            f"🧪 Сумма заказов за всё время: {summary['total_sum']:.2f} ₽\n\n"
+            f"👾 Заработок за сутки: {summary['day_sum']:.2f} ₽\n"
+            f"🧪 Заработок за всё время: {summary['total_sum']:.2f} ₽"
         )
         await update.message.reply_text(text, parse_mode="HTML")
         return
 
     bots = list_user_bots(user_id)
     if not bots:
-        await update.message.reply_text("🎄🚫 У вас нет подключённых франшизных ботов.")
+        await update.message.reply_text("🐲🧪 У вас нет подключённых франшизных ботов.")
         return
 
     bot_tokens = [bot.get("token") for bot in bots if bot.get("token")]
@@ -4635,18 +4655,18 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pending_total = sum(float(bot.get("pending_reward") or 0) for bot in bots)
     total_earned = summary["total_sum"]
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("💸 Вывести средства", callback_data="owner_withdraw")]]
+        [[InlineKeyboardButton("🟩 Вывести средства", callback_data="owner_withdraw")]]
     )
 
     text = (
-        f"✨ <b>Статистика ваших франшизных ботов</b>\n\n"
-        f"🎆️ Кол-во заказов за сутки: {summary['day_count']}\n"
-        f"🎆 Кол-во заказов за всё время: {summary['total_count']}\n\n"
-        f"🎁 Сумма заказов за сутки: {summary['day_sum']:.2f} ₽\n"
-        f"🎁 Сумма заказов за всё время: {total_earned:.2f} ₽\n\n"
-        f"💰 Заработок за всё время: {total_earned:.2f} ₽\n"
-        f"💼 Заработок до последнего обнуления: {pending_total:.2f} ₽\n"
-        f"📥 Баланс к выводу: {pending_total:.2f} ₽"
+        f"🐍 <b>Статистика ваших франшизных ботов</b>\n\n"
+        f"👾️ Кол-во заказов за сутки: {summary['day_count']}\n"
+        f"👾 Кол-во заказов за всё время: {summary['total_count']}\n\n"
+        f"🧪 Сумма заказов за сутки: {summary['day_sum']:.2f} ₽\n"
+        f"🧪 Сумма заказов за всё время: {total_earned:.2f} ₽\n\n"
+        f"🟩 Заработок за всё время: {total_earned:.2f} ₽\n"
+        f"🧫 Заработок до последнего обнуления: {pending_total:.2f} ₽\n"
+        f"🟢 Баланс к выводу: {pending_total:.2f} ₽"
     )
     await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
 
@@ -4658,18 +4678,18 @@ async def owner_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
     user_id = query.from_user.id
     bots = list_user_bots(user_id)
     if not bots:
-        await query.message.reply_text("🎄🚫 У вас нет подключённых франшизных ботов.")
+        await query.message.reply_text("🐲🧪 У вас нет подключённых франшизных ботов.")
         return
 
     pending_total = sum(float(bot.get("pending_reward") or 0) for bot in bots)
     if pending_total < 1000:
-        await query.message.reply_text("🎄🚫 Минимальная сумма для вывода — 1000 ₽.")
+        await query.message.reply_text("🐲🧪 Минимальная сумма для вывода — 1000 ₽.")
         return
 
     weekday = datetime.now().weekday()
     if weekday not in {0, 2, 4}:
         await query.message.reply_text(
-            "🎄🚫 Вывод средств доступен только в понедельник, среду и пятницу."
+            "🐲🧪 Вывод средств доступен только в понедельник, среду и пятницу."
         )
         return
 
@@ -4678,7 +4698,7 @@ async def owner_withdraw_callback(update: Update, context: ContextTypes.DEFAULT_
         "amount": pending_total,
     }
     await query.message.reply_text(
-        "💳 Введите реквизиты для вывода средств (текстом одним сообщением):"
+        "🟩 Введите реквизиты для вывода средств (текстом одним сообщением):"
     )
 
 @admin_only
@@ -4692,9 +4712,9 @@ async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c = conn.cursor()
             c.execute("INSERT OR IGNORE INTO banned (tg_id) VALUES (?)", (tg_id,))
             conn.commit()
-        await update.message.reply_text(f"🎉 Пользователь {tg_id} заблокирован")
+        await update.message.reply_text(f"👾 Пользователь {tg_id} заблокирован")
     except ValueError:
-        await update.message.reply_text("🎄🚫 Некорректный tg_id")
+        await update.message.reply_text("🐲🧪 Некорректный tg_id")
 
 
 # ==========================
@@ -4857,11 +4877,11 @@ def configure_application(app):
             username_label = f"@{username}" if username else "не указан"
 
             message = (
-                "💸 <b>Запрос на вывод средств</b>\n\n"
-                f"👤 Пользователь: {username_label}\n"
-                f"🆔 TG ID: {user_id}\n"
-                f"💰 Сумма к выводу: {amount:.2f} ₽\n"
-                f"💳 Реквизиты: {text.strip()}"
+                "🟩 <b>Запрос на вывод средств</b>\n\n"
+                f"🧟 Пользователь: {username_label}\n"
+                f"🧬 TG ID: {user_id}\n"
+                f"🟩 Сумма к выводу: {amount:.2f} ₽\n"
+                f"🟩 Реквизиты: {text.strip()}"
             )
             for admin_id in ADMIN_IDS:
                 try:
@@ -4874,7 +4894,7 @@ def configure_application(app):
                     reset_bot_reward(bot_id)
 
             await update.message.reply_text(
-                "✅ Запрос на вывод отправлен администратору. Баланс обнулён."
+                "🟢 Запрос на вывод отправлен администратору. Баланс обнулён."
             )
             return
 
@@ -4882,7 +4902,7 @@ def configure_application(app):
             city = text.strip()
             update_user_city(user_id, city)
             context.user_data.pop("awaiting_city", None)
-            await update.message.reply_text(f"🌟 Город сохранён: {city}")
+            await update.message.reply_text(f"🟢 Город сохранён: {city}")
             await send_profile_info(update.message, user_id, context)
             return
 
@@ -4904,7 +4924,7 @@ def configure_application(app):
             title = info.get("username") or info.get("first_name")
             create_bot_storage(token, user_id, title)
             await ensure_bot_running(token)
-            await update.message.reply_text("🤖 Бот успешно подключён! ✨")
+            await update.message.reply_text("👾 Бот успешно подключён! 🐍")
             await send_profile_info(update.message, user_id, context)
             return
 
@@ -4927,7 +4947,7 @@ def configure_application(app):
                     await update.message.reply_text("Можно сохранить не более 3 адресов")
                 else:
                     add_favorite_address(user_id, text.strip())
-                    await update.message.reply_text("❄️ Адрес добавлен")
+                    await update.message.reply_text("🐸 Адрес добавлен")
                 context.user_data.pop("awaiting_fav_action", None)
                 await send_profile_info(update.message, user_id, context)
                 return
@@ -4935,7 +4955,7 @@ def configure_application(app):
                 fav_id = context.user_data.get("fav_edit_id")
                 if fav_id:
                     update_favorite_address(fav_id, user_id, text.strip())
-                    await update.message.reply_text("🖊️❄️ Адрес обновлён")
+                    await update.message.reply_text("🧬🐸 Адрес обновлён")
                 context.user_data.pop("awaiting_fav_action", None)
                 context.user_data.pop("fav_edit_id", None)
                 await send_profile_info(update.message, user_id, context)
@@ -4976,7 +4996,7 @@ async def launch_bot(token: str):
     configure_application(app)
     started = False
     try:
-        logger.info("🤖 Бот запущен")
+        logger.info("👾 Бот запущен")
         await app.initialize()
         await app.start()
         await app.updater.start_polling()
@@ -4985,7 +5005,7 @@ async def launch_bot(token: str):
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            logger.info("🛑 Остановка бота")
+            logger.info("🧪 Остановка бота")
             raise
     except InvalidToken as e:
         bot_record = delete_bot_by_token(token)
