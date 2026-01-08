@@ -3477,6 +3477,39 @@ async def notify_admins(context, order_id):
         except Exception as e:
             logger.error(f"Ошибка уведомления админа {admin_id}: {e}")
 
+    context.application.create_task(order_pending_timeout(context, order_id))
+
+
+async def order_pending_timeout(context: ContextTypes.DEFAULT_TYPE, order_id: int, delay: int = 7 * 60):
+    await asyncio.sleep(delay)
+    order = get_order(order_id)
+    if not order or order.get("status") != "pending":
+        return
+
+    update_order_status(order_id, "cancelled")
+    set_setting("ordering_enabled", "0")
+
+    order_bot = get_order_bot(order)
+    user_id = order.get("tg_id")
+    message = (
+        f"🧿 Заказ №{order_id} отменён — все операторы заняты.\n"
+        "Приём заказов временно выключен."
+    )
+    try:
+        await order_bot.send_message(user_id, message)
+    except Exception as e:
+        logger.error("Не удалось уведомить пользователя %s об автоотмене: %s", user_id, e)
+
+    admin_message = (
+        f"🧿 Заказ №{order_id} отменён: все операторы заняты.\n"
+        "Приём заказов выключен. Включите в админке при готовности."
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            await primary_bot.send_message(admin_id, admin_message)
+        except Exception as e:
+            logger.error("Не удалось уведомить админа %s об автоотмене: %s", admin_id, e)
+
 
 async def notify_admins_reward(order: dict):
     if not order:
