@@ -184,9 +184,13 @@ def get_operator_name(user_id: int | None) -> str | None:
     return ADMIN_OPERATOR_NAMES.get(user_id)
 
 
-def format_operator_label(user_id: int | None, username: str | None = None) -> str:
+def format_operator_label(
+    user_id: int | None,
+    username: str | None = None,
+    include_username: bool = True,
+) -> str:
     operator_name = get_operator_name(user_id)
-    username_label = f"@{username}" if username else None
+    username_label = f"@{username}" if username and include_username else None
     if operator_name and username_label:
         return f"{operator_name} ({username_label})"
     if operator_name:
@@ -197,7 +201,7 @@ def format_operator_label(user_id: int | None, username: str | None = None) -> s
 
 
 def build_operator_signature(user_id: int | None, username: str | None = None) -> str:
-    return f"🧟 {format_operator_label(user_id, username)}"
+    return f"🧟 {format_operator_label(user_id, username, include_username=False)}"
 
 
 CHANNEL_URL = (os.getenv("CHANNEL_URL") or DEFAULT_CHANNEL_URL).strip()
@@ -782,6 +786,13 @@ def update_user_city(tg_id, city):
     with sqlite3.connect(USERS_DB) as conn:
         c = conn.cursor()
         c.execute("UPDATE users SET city=? WHERE tg_id=?", (city, tg_id))
+        conn.commit()
+
+
+def update_user_coefficient(tg_id: int, coefficient: float):
+    with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET coefficient=? WHERE tg_id=?", (coefficient, tg_id))
         conn.commit()
 
 
@@ -1809,6 +1820,7 @@ def admin_panel_keyboard():
     status_text = "👾 Заказы включены" if ordering_enabled else "🟩 Заказы выключены"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧪 Заказы пользователя", callback_data="admin_orders")],
+        [InlineKeyboardButton("🧪 Коэффициент клиента", callback_data="admin_coefficient")],
         [InlineKeyboardButton("🧿 Обновить информацию", callback_data="admin_refresh")],
         [InlineKeyboardButton("🧪 Выпуск промокодов", callback_data="admin_promo")],
         [InlineKeyboardButton("🧬 Все боты", callback_data="admin_all_bots")],
@@ -2316,7 +2328,8 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_PROMO_ACTIVATIONS,
     WAIT_PROMO_DISCOUNT,
     WAIT_ADMIN_PHOTO,
-) = range(27)
+    WAIT_ADMIN_COEFFICIENT,
+) = range(28)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -3888,6 +3901,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_orders":
         await query.message.reply_text("Введите Telegram ID пользователя для просмотра его заказов:")
         return WAIT_ADMIN_ORDERS
+    elif data == "admin_coefficient":
+        await query.message.reply_text(
+            "Введите Telegram ID и коэффициент через пробел (пример: 123456789 0.55):"
+        )
+        return WAIT_ADMIN_COEFFICIENT
     elif data == "admin_refresh":
         await refresh_all_users(query.message, context)
         return ConversationHandler.END
@@ -4273,6 +4291,39 @@ async def admin_orders_lookup(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"№{order['id']} — {order['status']} — {order['amount'] or 0:.2f} ₽ (база {order['base_amount'] or 0:.2f} ₽) — {order['created_at']}"
         )
     await update.message.reply_text("\n".join(lines), reply_markup=admin_panel_keyboard())
+    return ConversationHandler.END
+
+
+async def admin_coefficient_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_text = update.message.text.strip().replace(",", ".")
+    parts = raw_text.split()
+    if len(parts) != 2:
+        await update.message.reply_text(
+            "🐲🧪 Введите Telegram ID и коэффициент через пробел. Пример: 123456789 0.55"
+        )
+        return WAIT_ADMIN_COEFFICIENT
+
+    try:
+        target_id = int(parts[0])
+        coefficient = float(parts[1])
+        if coefficient <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "🐲🧪 Некорректные данные. Пример: 123456789 0.55"
+        )
+        return WAIT_ADMIN_COEFFICIENT
+
+    user = get_user(target_id)
+    if not user:
+        await update.message.reply_text("Пользователь не найден.", reply_markup=admin_panel_keyboard())
+        return ConversationHandler.END
+
+    update_user_coefficient(target_id, coefficient)
+    await update.message.reply_text(
+        f"🧪 Коэффициент для пользователя {target_id} обновлён до {coefficient:.2f}.",
+        reply_markup=admin_panel_keyboard(),
+    )
     return ConversationHandler.END
 
 
@@ -4846,11 +4897,12 @@ def configure_application(app):
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|sendphoto_|admin_orders|admin_refresh|admin_promo|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|cancelreason_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|sendphoto_|admin_orders|admin_coefficient|admin_refresh|admin_promo|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|cancelreason_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
             WAIT_ADMIN_ORDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_orders_lookup)],
+            WAIT_ADMIN_COEFFICIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_coefficient_update)],
             WAIT_ADMIN_BROADCAST: [
                 MessageHandler(
                     (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
@@ -4888,7 +4940,7 @@ def configure_application(app):
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(owner_withdraw_callback, pattern="^owner_withdraw$"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|cancelreason_|sendphoto_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_promo|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|cancelreason_|sendphoto_|pay_card_|replacement_|admin_replacements|admin_coefficient|admin_refresh|admin_promo|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
     app.add_handler(CommandHandler("start", start_over))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("ban", ban_user))
