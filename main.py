@@ -45,16 +45,23 @@ DEFAULT_SCREENSHOTS_DIR = BASE_DIR / "screens"
 MODEL_DIR = BASE_DIR / "models"
 MODEL_FILE_NAME = "qwen2.5-7b-instruct-q4_k_m.gguf"
 DEFAULT_MODEL_PATH = MODEL_DIR / MODEL_FILE_NAME
-DEFAULT_MODEL_URL = (
-    "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf"
-)
+DEFAULT_MODEL_URLS = [
+    "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf",
+    "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf?download=true",
+    "https://huggingface.co/TheBloke/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf",
+]
+MIN_MODEL_SIZE_BYTES = 200 * 1024 * 1024
 
 TOKEN = os.getenv("BOT_TOKEN") or locals().get("TOKEN")
 PRIMARY_BOT_TOKEN = (
     locals().get("PRIMARY_BOT_TOKEN") or os.getenv("PRIMARY_BOT_TOKEN") or TOKEN
 )
 LLM_MODEL_PATH = Path(os.getenv("LLM_MODEL_PATH") or DEFAULT_MODEL_PATH)
-LLM_MODEL_URL = os.getenv("LLM_MODEL_URL") or DEFAULT_MODEL_URL
+LLM_MODEL_URLS = [
+    url.strip()
+    for url in (os.getenv("LLM_MODEL_URLS") or "").split(",")
+    if url.strip()
+] or DEFAULT_MODEL_URLS
 LLM_THREADS = int(os.getenv("LLM_THREADS") or 12)
 LLM_CONTEXT = int(os.getenv("LLM_CONTEXT") or 2048)
 ADMIN_IDS = locals().get("ADMIN_IDS", [])
@@ -185,19 +192,45 @@ def get_order_bot(order: dict | None) -> Bot:
     return get_bot_client(token)
 
 
-def ensure_model_downloaded() -> Path:
-    if LLM_MODEL_PATH.exists():
-        return LLM_MODEL_PATH
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info("Скачиваю модель LLM в %s", LLM_MODEL_PATH)
-    with requests.get(LLM_MODEL_URL, stream=True, timeout=60) as response:
+def is_model_file_valid(path: Path) -> bool:
+    try:
+        return path.exists() and path.stat().st_size >= MIN_MODEL_SIZE_BYTES
+    except OSError:
+        return False
+
+
+def download_model(url: str, path: Path) -> None:
+    logger.info("Скачиваю модель LLM из %s", url)
+    with requests.get(url, stream=True, timeout=60) as response:
         response.raise_for_status()
-        with open(LLM_MODEL_PATH, "wb") as file:
+        with open(path, "wb") as file:
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     file.write(chunk)
-    logger.info("Модель LLM успешно скачана")
-    return LLM_MODEL_PATH
+
+
+def ensure_model_downloaded() -> Path:
+    if is_model_file_valid(LLM_MODEL_PATH):
+        return LLM_MODEL_PATH
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    errors = []
+    for url in LLM_MODEL_URLS:
+        try:
+            download_model(url, LLM_MODEL_PATH)
+            if is_model_file_valid(LLM_MODEL_PATH):
+                logger.info("Модель LLM успешно скачана")
+                return LLM_MODEL_PATH
+            raise ValueError("Скачанный файл модели слишком мал")
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+            logger.warning("Не удалось скачать модель из %s: %s", url, exc)
+            try:
+                LLM_MODEL_PATH.unlink(missing_ok=True)
+            except OSError:
+                pass
+    raise RuntimeError(
+        "Не удалось скачать модель LLM. Ошибки: " + "; ".join(errors)
+    )
 
 
 async def get_llm() -> Llama:
@@ -214,6 +247,7 @@ async def get_llm() -> Llama:
                 model_path=str(LLM_MODEL_PATH),
                 n_ctx=LLM_CONTEXT,
                 n_threads=LLM_THREADS,
+                n_gpu_layers=0,
             )
 
         LLM_INSTANCE = await asyncio.to_thread(_init_llm)
@@ -273,13 +307,15 @@ def get_operator_name(user_id: int | None) -> str | None:
     return ADMIN_OPERATOR_NAMES.get(user_id)
 
 
-def format_operator_label(user_id: int | None, username: str | None = None) -> str:
+def format_operator_label(
+    user_id: int | None, username: str | None = None, include_username: bool = True
+) -> str:
     operator_name = get_operator_name(user_id)
-    username_label = f"@{username}" if username else None
+    username_label = f"@{username}" if username and include_username else None
     if operator_name and username_label:
         return f"{operator_name} ({username_label})"
     if operator_name:
-        return f"{operator_name} (ID: {user_id})"
+        return operator_name
     if username_label:
         return username_label
     return f"ID: {user_id}" if user_id else "не указан"
@@ -287,6 +323,11 @@ def format_operator_label(user_id: int | None, username: str | None = None) -> s
 
 def build_operator_signature(user_id: int | None, username: str | None = None) -> str:
     return f"🧟 {format_operator_label(user_id, username)}"
+
+
+def build_operator_signature_client(user_id: int | None) -> str:
+    label = format_operator_label(user_id, include_username=False)
+    return f"🧟 {label}"
 
 
 CHANNEL_URL = (os.getenv("CHANNEL_URL") or DEFAULT_CHANNEL_URL).strip()
@@ -3903,10 +3944,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user_id = order.get("tg_id")
         operator_label = format_operator_label(query.from_user.id, query.from_user.username)
+        operator_signature_client = build_operator_signature_client(query.from_user.id)
         status_frames = [
-            f"🐊 Уже взяли в работу ваш заказ\n{build_operator_signature(query.from_user.id, query.from_user.username)}",
-            f"🧪 Трудимся над вашим заказом\n{build_operator_signature(query.from_user.id, query.from_user.username)}",
-            f"🟩 Скоро начнём поиск такси\n{build_operator_signature(query.from_user.id, query.from_user.username)}",
+            f"🐊 Уже взяли в работу ваш заказ\n{operator_signature_client}",
+            f"🧪 Трудимся над вашим заказом\n{operator_signature_client}",
+            f"🟩 Скоро начнём поиск такси\n{operator_signature_client}",
         ]
         status_message = await order_bot.send_message(user_id, status_frames[0])
         context.application.create_task(
@@ -3973,7 +4015,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
         order_bot = get_order_bot(order)
         tg_id = order.get("tg_id")
-        operator_signature = build_operator_signature(query.from_user.id, query.from_user.username)
+        operator_signature = build_operator_signature_client(query.from_user.id)
         found_frames = [
             f"🟢 Машина успешно найдена\n{operator_signature}",
             f"🧪 Сейчас отправим вам ссылку на машину\n{operator_signature}",
@@ -4330,7 +4372,7 @@ async def admin_send_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
     order_bot = get_order_bot(order)
     tg_id = order.get("tg_id")
-    operator_signature = build_operator_signature(update.effective_user.id, update.effective_user.username)
+    operator_signature = build_operator_signature_client(update.effective_user.id)
     await order_bot.send_message(tg_id, f"🧿 Сообщение от администратора:\n{text}\n\n{operator_signature}")
     await update.message.reply_text("Сообщение отправлено. Теперь введите сумму заказа (₽):")
     return WAIT_ADMIN_SUM
@@ -4349,7 +4391,7 @@ async def admin_send_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     order_bot = get_order_bot(order)
     tg_id = order.get("tg_id")
-    operator_signature = build_operator_signature(update.effective_user.id, update.effective_user.username)
+    operator_signature = build_operator_signature_client(update.effective_user.id)
     caption = update.message.caption or ""
     message_caption = f"{caption}\n\n{operator_signature}".strip()
     photo = update.message.photo[-1]
