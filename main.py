@@ -12,6 +12,8 @@ import re
 import warnings
 import shutil
 import string
+from bs4 import BeautifulSoup
+from llama_cpp import Llama
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -40,11 +42,21 @@ from telegram.warnings import PTBUserWarning
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB_DIR = BASE_DIR / "db"
 DEFAULT_SCREENSHOTS_DIR = BASE_DIR / "screens"
+MODEL_DIR = BASE_DIR / "models"
+MODEL_FILE_NAME = "qwen2.5-7b-instruct-q4_k_m.gguf"
+DEFAULT_MODEL_PATH = MODEL_DIR / MODEL_FILE_NAME
+DEFAULT_MODEL_URL = (
+    "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/main/qwen2.5-7b-instruct-q4_k_m.gguf"
+)
 
 TOKEN = os.getenv("BOT_TOKEN") or locals().get("TOKEN")
 PRIMARY_BOT_TOKEN = (
     locals().get("PRIMARY_BOT_TOKEN") or os.getenv("PRIMARY_BOT_TOKEN") or TOKEN
 )
+LLM_MODEL_PATH = Path(os.getenv("LLM_MODEL_PATH") or DEFAULT_MODEL_PATH)
+LLM_MODEL_URL = os.getenv("LLM_MODEL_URL") or DEFAULT_MODEL_URL
+LLM_THREADS = int(os.getenv("LLM_THREADS") or 12)
+LLM_CONTEXT = int(os.getenv("LLM_CONTEXT") or 2048)
 ADMIN_IDS = locals().get("ADMIN_IDS", [])
 ADMIN_OPERATOR_NAMES = {
     7515876699: "Оператор Майк",
@@ -106,6 +118,8 @@ REQUEST_TIMEOUTS = dict(connect_timeout=15, read_timeout=30, write_timeout=30)
 primary_bot = Bot(token=PRIMARY_BOT_TOKEN, request=HTTPXRequest(**REQUEST_TIMEOUTS))
 bot_clients: dict[str, Bot] = {}
 bot_link_cache: dict[str, str] = {}
+LLM_INSTANCE: Llama | None = None
+LLM_LOCK = asyncio.Lock()
 
 
 def _markup_to_dict(markup):
@@ -170,6 +184,81 @@ def get_order_bot(order: dict | None) -> Bot:
         token = order.get("bot_token") or PRIMARY_BOT_TOKEN
     return get_bot_client(token)
 
+
+def ensure_model_downloaded() -> Path:
+    if LLM_MODEL_PATH.exists():
+        return LLM_MODEL_PATH
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info("Скачиваю модель LLM в %s", LLM_MODEL_PATH)
+    with requests.get(LLM_MODEL_URL, stream=True, timeout=60) as response:
+        response.raise_for_status()
+        with open(LLM_MODEL_PATH, "wb") as file:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    file.write(chunk)
+    logger.info("Модель LLM успешно скачана")
+    return LLM_MODEL_PATH
+
+
+async def get_llm() -> Llama:
+    global LLM_INSTANCE
+    if LLM_INSTANCE is not None:
+        return LLM_INSTANCE
+    async with LLM_LOCK:
+        if LLM_INSTANCE is not None:
+            return LLM_INSTANCE
+
+        def _init_llm():
+            ensure_model_downloaded()
+            return Llama(
+                model_path=str(LLM_MODEL_PATH),
+                n_ctx=LLM_CONTEXT,
+                n_threads=LLM_THREADS,
+            )
+
+        LLM_INSTANCE = await asyncio.to_thread(_init_llm)
+        return LLM_INSTANCE
+
+
+def search_web(query: str, limit: int = 3) -> list[dict]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; TaxiBot/1.0; +https://t.me/TaxiFromMike)"
+    }
+    response = requests.get(
+        "https://duckduckgo.com/html/",
+        params={"q": query, "kl": "ru-ru"},
+        headers=headers,
+        timeout=15,
+    )
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    results = []
+    for result in soup.select("div.result"):
+        link = result.select_one("a.result__a")
+        snippet = result.select_one(".result__snippet")
+        if not link:
+            continue
+        results.append(
+            {
+                "title": link.get_text(strip=True),
+                "url": link.get("href"),
+                "snippet": snippet.get_text(strip=True) if snippet else "",
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def format_search_context(results: list[dict]) -> str:
+    if not results:
+        return ""
+    lines = ["Результаты поиска:"]
+    for idx, item in enumerate(results, start=1):
+        snippet = f" — {item['snippet']}" if item.get("snippet") else ""
+        lines.append(f"{idx}. {item['title']} ({item['url']}){snippet}")
+    return "\n".join(lines)
+
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
 os.makedirs(DB_DIR, exist_ok=True)
 
@@ -208,6 +297,7 @@ PROFILE_BTN = "Профиль 🐍"
 ORDER_BTN = "Заказать такси 🐲🦖"
 HELP_BTN = "Помощь 🐸"
 PRICE_BTN = "Проверить цену 🟩"
+TRAVEL_BTN = "Куда мне поехать 🧭"
 ADMIN_BTN = "Админка 🧟‍♂️"
 BACK_BTN = "Назад 🧟"
 FAQ_BTN = "FAQ 🧬"
@@ -217,6 +307,7 @@ MAIN_MENU_BUTTONS = {
     ORDER_BTN,
     HELP_BTN,
     PRICE_BTN,
+    TRAVEL_BTN,
     ADMIN_BTN,
     BACK_BTN,
     FAQ_BTN,
@@ -236,6 +327,14 @@ PRICE_TARIFFS = [
     ("vip", "🧫 Бизнес"),
     ("ultimate", "🐍 Премьер"),
     ("maybach", "🐲 Элит"),
+]
+
+TRAVEL_CATEGORIES = [
+    ("bars", "🍺 Бары", "бары"),
+    ("cinema", "🎬 Кино", "кино"),
+    ("restaurants", "🍽️ Рестораны", "рестораны"),
+    ("clubs", "🎧 Клубы", "клубы"),
+    ("places", "🗺️ Интересные места", "интересные места"),
 ]
 
 ORDER_TARIFF_PRICE_CLASS = {
@@ -381,6 +480,9 @@ def init_db(db_path=DB_PATH):
         c.execute(
             "INSERT OR IGNORE INTO settings (key, value) VALUES ('ordering_enabled', '1')"
         )
+        c.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('payment_coefficient', '0.55')"
+        )
 
         c.execute(
             """
@@ -513,6 +615,28 @@ def set_setting(key, value, db_path=DB_PATH):
 
 def is_ordering_enabled():
     return get_setting("ordering_enabled", "1") == "1"
+
+
+def get_payment_coefficient(default: float = 0.55) -> float:
+    raw_value = get_setting("payment_coefficient", str(default))
+    try:
+        value = float(str(raw_value).replace(",", "."))
+        if value <= 0:
+            raise ValueError
+        return value
+    except ValueError:
+        return default
+
+
+def set_payment_coefficient(value: float) -> None:
+    set_setting("payment_coefficient", f"{value:.4f}")
+
+
+def update_all_user_coefficients(value: float) -> None:
+    with sqlite3.connect(USERS_DB) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET coefficient=?", (value,))
+        conn.commit()
 
 # ==========================
 # Работа с пользователями
@@ -1522,6 +1646,7 @@ def main_menu_keyboard(user_id=None):
         [KeyboardButton(PROFILE_BTN)],
         [KeyboardButton(ORDER_BTN)],
         [KeyboardButton(PRICE_BTN)],
+        [KeyboardButton(TRAVEL_BTN)],
         [KeyboardButton(HELP_BTN)],
     ]
     if user_id in ADMIN_IDS:
@@ -1552,6 +1677,12 @@ def faq_keyboard():
 
 def taxi_force_reply_markup():
     return ForceReply(selective=True, input_field_placeholder="Такси от Майка")
+
+
+def travel_categories_keyboard():
+    buttons = [[InlineKeyboardButton(label, callback_data=f"travel_{key}")] for key, label, _ in TRAVEL_CATEGORIES]
+    buttons.append([InlineKeyboardButton("🔙 Назад", callback_data="travel_back")])
+    return InlineKeyboardMarkup(buttons)
 
 
 def profile_keyboard(has_city: bool, has_favorites: bool):
@@ -1807,6 +1938,7 @@ def admin_panel_keyboard():
     ordering_enabled = is_ordering_enabled()
     ordering_label = "🧟 Остановить приём заказов" if ordering_enabled else "🐲 Включить приём заказов"
     status_text = "👾 Заказы включены" if ordering_enabled else "🟩 Заказы выключены"
+    coefficient = get_payment_coefficient()
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧪 Заказы пользователя", callback_data="admin_orders")],
         [InlineKeyboardButton("🧿 Обновить информацию", callback_data="admin_refresh")],
@@ -1819,6 +1951,7 @@ def admin_panel_keyboard():
         [InlineKeyboardButton("🟢 Перезапуск ботов", callback_data="admin_restart_bots")],
         [InlineKeyboardButton("🧿 Заказы для подмены", callback_data="admin_replacements")],
         [InlineKeyboardButton("🧪 Очистить подмены", callback_data="admin_podmena_clear")],
+        [InlineKeyboardButton(f"🧮 Коэффициент оплаты: {coefficient:.2f}", callback_data="admin_coefficient")],
         [InlineKeyboardButton(ordering_label, callback_data="admin_toggle")],
         [InlineKeyboardButton(status_text, callback_data="admin_status")],
     ])
@@ -1948,7 +2081,7 @@ async def send_profile_info(target, user_id, context):
 
     username = user["username"]
     orders_count = user["orders_count"]
-    coefficient = user["coefficient"]
+    coefficient = get_payment_coefficient()
     city = user["city"]
     user_bots = list_user_bots(user_id)
     referral_code = ensure_referral_code(user_id)
@@ -2000,6 +2133,99 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, reply_markup=back_keyboard())
 
 
+async def travel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text(
+        "🏙️ Напишите ваш город, чтобы я подобрал места.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return WAIT_TRAVEL_CITY
+
+
+async def travel_city_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        await update.message.reply_text("🏙️ Напишите ваш город текстом.")
+        return WAIT_TRAVEL_CITY
+    city = update.message.text.strip()
+    if not city:
+        await update.message.reply_text("🏙️ Город не распознан, попробуйте ещё раз.")
+        return WAIT_TRAVEL_CITY
+    context.user_data["travel_city"] = city
+    await update.message.reply_text(
+        "🧭 Куда хотите поехать? Выберите категорию:",
+        reply_markup=travel_categories_keyboard(),
+    )
+    return WAIT_TRAVEL_CATEGORY
+
+
+async def travel_category_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "travel_back":
+        await query.message.reply_text(
+            "🔙 Возвращаю в главное меню.",
+            reply_markup=main_menu_keyboard(query.from_user.id),
+        )
+        return ConversationHandler.END
+
+    city = context.user_data.get("travel_city")
+    if not city:
+        await query.message.reply_text("🏙️ Сначала укажите город.")
+        return WAIT_TRAVEL_CITY
+
+    key = query.data.replace("travel_", "", 1)
+    category = next((item for item in TRAVEL_CATEGORIES if item[0] == key), None)
+    if not category:
+        await query.message.reply_text("🐸 Не удалось определить категорию, попробуйте ещё раз.")
+        return WAIT_TRAVEL_CATEGORY
+
+    _, _, prompt_label = category
+    await query.message.reply_text("⏳ Ищу рекомендации с нейросетью и интернетом...")
+
+    base_prompt = (
+        f"Привет, я живу в городе {city}. Сегодня я хочу в своем городе посетитить {prompt_label}. "
+        "Что посоветуешь? 2 топ заведения в этой категории с адресом и средним чеком."
+    )
+    search_query = f"{city} {prompt_label} лучшие места"
+
+    try:
+        results = await asyncio.to_thread(search_web, search_query, 3)
+        search_context = format_search_context(results)
+        prompt = f"{base_prompt}\n\n{search_context}" if search_context else base_prompt
+        llm = await get_llm()
+
+        def _generate():
+            result = llm(
+                prompt,
+                max_tokens=400,
+                temperature=0.7,
+                top_p=0.9,
+            )
+            return (result.get("choices") or [{}])[0].get("text", "").strip()
+
+        answer = await asyncio.to_thread(_generate)
+    except Exception as exc:
+        logger.error("Ошибка генерации рекомендаций: %s", exc)
+        await query.message.reply_text(
+            "😿 Не удалось получить рекомендации, попробуйте позже.",
+            reply_markup=main_menu_keyboard(query.from_user.id),
+        )
+        return ConversationHandler.END
+
+    if not answer:
+        await query.message.reply_text(
+            "😿 Нейросеть не смогла ответить, попробуйте позже.",
+            reply_markup=main_menu_keyboard(query.from_user.id),
+        )
+        return ConversationHandler.END
+
+    await query.message.reply_text(
+        f"🤖 {answer}",
+        reply_markup=main_menu_keyboard(query.from_user.id),
+    )
+    return ConversationHandler.END
+
+
 async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return None
@@ -2021,6 +2247,8 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
     if text == PRICE_BTN:
         return await price_check_start(update, context)
+    if text == TRAVEL_BTN:
+        return await travel_start(update, context)
     if text == FAQ_BTN:
         await update.message.reply_text(
             "Откройте ответы на частые вопросы:", reply_markup=faq_keyboard()
@@ -2316,7 +2544,10 @@ async def order_payment_method(update: Update, context: ContextTypes.DEFAULT_TYP
     WAIT_PROMO_ACTIVATIONS,
     WAIT_PROMO_DISCOUNT,
     WAIT_ADMIN_PHOTO,
-) = range(27)
+    WAIT_TRAVEL_CITY,
+    WAIT_TRAVEL_CATEGORY,
+    WAIT_ADMIN_COEFFICIENT,
+) = range(30)
 
 # ==========================
 # Пользовательский сценарий заказа
@@ -2442,7 +2673,8 @@ async def price_tariff_selected(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return ConversationHandler.END
 
-    our_price = round(price_value * 0.55, 2)
+    coefficient = get_payment_coefficient()
+    our_price = round(price_value * coefficient, 2)
     data["app_price"] = price_value
     data["our_price"] = our_price
     data["price_class"] = price_class
@@ -2996,7 +3228,8 @@ async def ensure_text_order_price(order_data: dict) -> None:
     if price_value is None:
         return
 
-    our_price = round(price_value * 0.55, 2)
+    coefficient = get_payment_coefficient()
+    our_price = round(price_value * coefficient, 2)
     order_data["price_key"] = price_key
     order_data["app_price"] = price_value
     order_data["our_price"] = our_price
@@ -3894,6 +4127,13 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "admin_promo":
         await query.message.reply_text("🧪 Введите количество активаций промокода:")
         return WAIT_PROMO_ACTIVATIONS
+    elif data == "admin_coefficient":
+        current = get_payment_coefficient()
+        await query.message.reply_text(
+            f"🧮 Текущий коэффициент: {current:.2f}\n"
+            "Введите новый коэффициент (например 0.55):"
+        )
+        return WAIT_ADMIN_COEFFICIENT
     elif data == "admin_all_bots":
         await query.message.reply_text(
             "🧬 Подключённые боты по владельцам:", reply_markup=admins_bots_keyboard()
@@ -4441,6 +4681,25 @@ async def admin_promo_discount(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 
+async def admin_coefficient_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_value = update.message.text.replace(" ", "").replace(",", ".")
+    try:
+        coefficient = float(raw_value)
+        if coefficient <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("🐲🧪 Некорректный коэффициент, введите число больше 0.")
+        return WAIT_ADMIN_COEFFICIENT
+
+    set_payment_coefficient(coefficient)
+    update_all_user_coefficients(coefficient)
+    await update.message.reply_text(
+        f"🧮 Коэффициент обновлён: {coefficient:.2f}",
+        reply_markup=admin_panel_keyboard(),
+    )
+    return ConversationHandler.END
+
+
 
 # Подтверждение суммы и списание баланса
 async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4460,7 +4719,7 @@ async def admin_sum(update: Update, context: ContextTypes.DEFAULT_TYPE):
     order = get_order(order_id)
     tg_id = order.get("tg_id")
     user = get_user(tg_id)
-    coefficient = user["coefficient"] if user else 1
+    coefficient = get_payment_coefficient()
     total = round(amount * coefficient, 2)
     orders_count = int((user or {}).get("orders_count") or 0)
     is_free_ride = orders_count % 15 == 0 and total <= 1000
@@ -4811,6 +5070,7 @@ def configure_application(app):
         entry_points=[
             CallbackQueryHandler(order_type_callback, pattern="^order_"),
             MessageHandler(filters.Regex(f"^{re.escape(PRICE_BTN)}$"), price_check_start),
+            MessageHandler(filters.Regex(f"^{re.escape(TRAVEL_BTN)}$"), travel_start),
         ],
         states={
             WAIT_SCREENSHOT: [MessageHandler(filters.PHOTO, screenshot_receive)],
@@ -4839,6 +5099,8 @@ def configure_application(app):
             WAIT_PRICE_ADDRESS_TO: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_address_to)],
             WAIT_PRICE_TARIFF: [CallbackQueryHandler(price_tariff_selected, pattern="^price_tariff_")],
             WAIT_PRICE_DECISION: [CallbackQueryHandler(price_order_decision, pattern="^price_")],
+            WAIT_TRAVEL_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, travel_city_input)],
+            WAIT_TRAVEL_CATEGORY: [CallbackQueryHandler(travel_category_selected, pattern="^travel_")],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
@@ -4846,7 +5108,7 @@ def configure_application(app):
     )
 
     admin_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|sendphoto_|admin_orders|admin_refresh|admin_promo|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|cancelreason_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
+        entry_points=[CallbackQueryHandler(admin_callback, pattern="^(chat_|found_|sendphoto_|admin_orders|admin_refresh|admin_promo|admin_coefficient|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_toggle|admin_status|admin_replacements|admin_podmena_clear|replacement_|take_|reject_|search_|cancelsearch_|cancel_|cancelreason_|payapprove_|paydecline_|botreset_|botadd_|botsub_)")],
         states={
             WAIT_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_send_message)],
             WAIT_ADMIN_SUM: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_sum)],
@@ -4862,6 +5124,7 @@ def configure_application(app):
             WAIT_PROMO_ACTIVATIONS: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_promo_activations)],
             WAIT_PROMO_DISCOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_promo_discount)],
             WAIT_ADMIN_PHOTO: [MessageHandler(filters.PHOTO & ~filters.COMMAND, admin_send_photo)],
+            WAIT_ADMIN_COEFFICIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_coefficient_update)],
         },
         fallbacks=[CommandHandler("start", start_over)],
         per_user=True,
@@ -4888,7 +5151,7 @@ def configure_application(app):
     app.add_handler(CallbackQueryHandler(profile_callback, pattern="^profile_"))
     app.add_handler(CallbackQueryHandler(favorite_address_callback, pattern="^fav_(from|to|third)_"))
     app.add_handler(CallbackQueryHandler(owner_withdraw_callback, pattern="^owner_withdraw$"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|cancelreason_|sendphoto_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_promo|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
+    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^(take_|reject_|search_|cancel_|cancelsearch_|cancelreason_|sendphoto_|pay_card_|replacement_|admin_replacements|admin_refresh|admin_promo|admin_coefficient|admin_all_bots|admin_franchise_db|admin_owner_|admin_broadcast|admin_users_count|admin_dump_db|admin_restart_bots|admin_podmena_clear|payapprove_|paydecline_|botreset_|botadd_|botsub_)"))
     app.add_handler(CommandHandler("start", start_over))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("ban", ban_user))
@@ -5000,6 +5263,8 @@ def configure_application(app):
             await help_menu(update, context)
         elif text == ORDER_BTN:
             await order_menu(update, context)
+        elif text == TRAVEL_BTN:
+            await travel_start(update, context)
         elif text == FAQ_BTN:
             await update.message.reply_text(
                 "Откройте ответы на частые вопросы:", reply_markup=faq_keyboard()

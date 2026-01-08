@@ -1,2 +1,4 @@
 python-telegram-bot==22.5
 requests==2.32.3
+llama-cpp-python
+beautifulsoup4
